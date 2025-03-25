@@ -46,13 +46,7 @@ const pool = new Pool({
 export default pool;
 
 
-const corsOptions = {
-   origin: 'http://167.86.84.197', // Укажите IP-адрес или домен, с которого будет происходить запрос
-   methods: ['GET', 'POST', 'PUT', 'DELETE'], // Укажите необходимые методы
-   allowedHeaders: ['Content-Type', 'Authorization'], // Укажите разрешенные заголовки
-};
-
-app.use(cors(corsOptions));
+app.use(cors());
 
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'fileBase')));
