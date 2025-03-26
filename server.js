@@ -15,7 +15,6 @@ import multer from 'multer';
 import { TextDecoder } from 'util';
 import iconv from 'iconv-lite'
 import xss from 'xss';
-import helmet from 'helmet'
 
 dotenv.config();
 
@@ -916,6 +915,29 @@ app.post('/add-order', async (req, res) => {
       console.error('Ошибка:', err);
       res.status(500).json({ error: 'Ошибка сервера', message: err.message });
    }
+});
+
+app.post('/check-rate', (req, res) => {
+   const { account_id, users_id } = req.body;
+
+   if (account_id === undefined || users_id === undefined) {
+      return res.status(400).json({ error: 'Все поля должны быть заполнены' });
+   }
+
+   const checkSql = 'SELECT * FROM rating WHERE account_id = $1 AND users_id = $2';
+
+   pool.query(checkSql, [account_id, users_id], (err, results) => {
+      if (err) {
+         console.error('Ошибка при проверке оценки:', err);
+         return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+
+      if (results.rows.length > 0) {
+         res.json({ rated: true, rate: results.rows[0].rate });
+      } else {
+         res.json({ rated: false });
+      }
+   });
 });
 
 app.get('/get-orders', async (req, res) => {
