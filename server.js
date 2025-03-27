@@ -1608,6 +1608,118 @@ app.post("/update-account-date", async (req, res) => {
    }
 });
 
+app.put("/update-account", async (req, res) => {
+   try {
+      const { id, name, city, tags } = req.body;
+
+      if (!id) {
+         return res.status(400).json({ error: "ID аккаунта обязателен" });
+      }
+
+      await pool.query("BEGIN"); // Начинаем транзакцию
+
+      // 1. Обновление имени аккаунта
+      if (name) {
+         await pool.query(
+            `UPDATE accounts SET name = $1 WHERE id = $2`,
+            [name, id]
+         );
+      }
+
+      let cityId = null;
+
+      // 2. Работа с городом
+      if (city) {
+         const cityResult = await pool.query(
+            `SELECT id FROM city WHERE name_ru = $1 OR name_eu = $1`,
+            [city]
+         );
+
+         if (cityResult.rows.length > 0) {
+            cityId = cityResult.rows[0].id;
+         } else {
+            const newCity = await pool.query(
+               `INSERT INTO city (name_ru, name_eu) VALUES ($1, $1) RETURNING id`,
+               [city]
+            );
+            cityId = newCity.rows[0].id;
+         }
+
+         await pool.query(
+            `UPDATE accounts SET "City_id" = $1 WHERE id = $2`,
+            [cityId, id]
+         );
+      }
+
+      // 3. Работа с тегами
+      const tagList = tags ? tags.split(",").map((t) => t.trim()) : [];
+
+      // Получаем все текущие теги аккаунта
+      const existingTags = await pool.query(
+         `SELECT tag_id FROM tags_detail WHERE account_id = $1`,
+         [id]
+      );
+      const existingTagIds = existingTags.rows.map(row => row.tag_id);
+
+      const newTagIds = [];
+
+      for (const tag of tagList) {
+         let tagId;
+
+         // Проверяем, существует ли тег
+         const tagResult = await pool.query(
+            `SELECT id FROM tags WHERE name_ru = $1 OR name_eu = $1`,
+            [tag]
+         );
+
+         if (tagResult.rows.length > 0) {
+            tagId = tagResult.rows[0].id;
+         } else {
+            // Добавляем новый тег
+            const newTag = await pool.query(
+               `INSERT INTO tags (name_ru, name_eu) VALUES ($1, $1) RETURNING id`,
+               [tag]
+            );
+            tagId = newTag.rows[0].id;
+         }
+
+         newTagIds.push(tagId);
+
+         // Проверяем, есть ли связь с аккаунтом
+         const tagDetailResult = await pool.query(
+            `SELECT id FROM tags_detail WHERE tag_id = $1 AND account_id = $2`,
+            [tagId, id]
+         );
+
+         if (tagDetailResult.rows.length === 0) {
+            // Если нет, создаем связь
+            await pool.query(
+               `INSERT INTO tags_detail (tag_id, account_id) VALUES ($1, $2)`,
+               [tagId, id]
+            );
+         }
+      }
+
+      // 4. Удаление старых тегов, которые не переданы в запросе
+      const tagsToRemove = existingTagIds.filter(tagId => !newTagIds.includes(tagId));
+
+      if (tagsToRemove.length > 0) {
+         await pool.query(
+            `DELETE FROM tags_detail WHERE account_id = $1 AND tag_id = ANY($2)`,
+            [id, tagsToRemove]
+         );
+      }
+
+      await pool.query("COMMIT"); // Фиксируем изменения
+
+      res.json({ message: "Аккаунт успешно обновлен" });
+   } catch (err) {
+      await pool.query("ROLLBACK"); // Откатываем изменения в случае ошибки
+      console.error("Ошибка:", err);
+      res.status(500).json({ error: "Ошибка сервера", message: err.message });
+   }
+});
+
 app.get('/sections', async (req, res) => {
    try {
       const { page_name } = req.query;
