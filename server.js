@@ -1567,7 +1567,7 @@ app.post("/save-sections", upload.array('files'), async (req, res) => {
       res.json({ message: "Секции успешно сохранены!" });
    } catch (error) {
       console.error("Ошибка при сохранении секций:", error);
-      res.status(500).json({ error: "Ошибка сервера" });
+      res.status(500).json({ error: error });
    }
 });
 
