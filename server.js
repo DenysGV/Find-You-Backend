@@ -1523,6 +1523,16 @@ app.post("/save-sections", upload.array('files'), async (req, res) => {
       await pool.query(`DELETE FROM sections WHERE page_name = $1`, [page_name]);
 
       // Если папка уже существует, удаляем её вместе с содержимым
+      console.log(fs.existsSync(sectionDir));
+
+      console.log("Запрос получен");
+      console.log("page_name:", page_name);
+      console.log("sections:", sections);
+      console.log("Существует ли папка?", fs.existsSync(sectionDir));
+      console.log("__dirname:", __dirname);
+      console.log("req files:", req.files);
+
+
       if (fs.existsSync(sectionDir)) {
          fs.rmSync(sectionDir, { recursive: true, force: true });
       }
