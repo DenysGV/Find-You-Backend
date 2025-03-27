@@ -1525,14 +1525,6 @@ app.post("/save-sections", upload.array('files'), async (req, res) => {
       // Если папка уже существует, удаляем её вместе с содержимым
       console.log(fs.existsSync(sectionDir));
 
-      console.log("Запрос получен");
-      console.log("page_name:", page_name);
-      console.log("sections:", sections);
-      console.log("Существует ли папка?", fs.existsSync(sectionDir));
-      console.log("__dirname:", __dirname);
-      console.log("req files:", req.files);
-
-
       if (fs.existsSync(sectionDir)) {
          fs.rmSync(sectionDir, { recursive: true, force: true });
       }
@@ -1553,8 +1545,8 @@ app.post("/save-sections", upload.array('files'), async (req, res) => {
          // Проверяем, есть ли файлы для сохранения
          if (req.files && req.files.length > 0) {
             req.files.forEach((file) => {
-               const tempFilePath = path.join(__dirname, "fileBase", file.filename);  // Временный файл
-               const newFilePath = path.join(sectionDir, file.originalname);  // Новый путь
+               const tempFilePath = file.path; // Используем путь, который multer присвоил файлу
+               const newFilePath = path.join(sectionDir, file.originalname);
 
                try {
                   fs.renameSync(tempFilePath, newFilePath);  // Перемещаем файл
