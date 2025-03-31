@@ -15,6 +15,7 @@ import multer from 'multer';
 import { TextDecoder } from 'util';
 import iconv from 'iconv-lite'
 import xss from 'xss';
+import { createDirectory, listFiles, uploadFile, deleteFile, getPublicUrl } from './sftp-utils.js';
 
 dotenv.config();
 
@@ -47,7 +48,7 @@ export default pool;
 
 app.use(cors());
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'fileBase')));
 app.use((req, res, next) => {
    // Рекурсивно очищаем все поля в запросах
@@ -125,53 +126,72 @@ function parseTxtFile(filePath) {
          return reject(new Error('Файл пустой или не найден'));
       }
 
-      // Регулярное выражение для извлечения всего аккаунта
       const readyAccounts = [];
-      const accountPattern = /<title>(.*?)<\/title>[\s\S]*?<id>(.*?)<\/id>[\s\S]*?<dr>(.*?)<\/dr>[\s\S]*?<city>(.*?)<\/city>[\s\S]*?<skype>(.*?)<\/skype>[\s\S]*?<icq>(.*?)<\/icq>[\s\S]*?<fb>(.*?)<\/fb>[\s\S]*?<od>(.*?)<\/od>[\s\S]*?<insta>(.*?)<\/insta>[\s\S]*?<tw>(.*?)<\/tw>[\s\S]*?<girl>(.*?)<\/girl>[\s\S]*?<boy>(.*?)<\/boy>[\s\S]*?<email>(.*?)<\/email>[\s\S]*?<tg>(.*?)<\/tg>[\s\S]*?<tik>(.*?)<\/tik>[\s\S]*?<of>(.*?)<\/of>[\s\S]*?<tel>(.*?)<\/tel>[\s\S]*?<nvideo>(.*?)<\/nvideo>[\s\S]*?<tags>(.*?)<\/tags>[\s\S]*?<date>(.*?)<\/date>?/g;
+      // Изменяем регулярное выражение для извлечения блоков аккаунтов
+      const accountBlockPattern = /<title>(.*?)<\/title>[\s\S]*?<id>(.*?)<\/id>[\s\S]*?(?:<date>(.*?)<\/date>|<\/tags>)/g;
 
-      let match;
-      while ((match = accountPattern.exec(fileContent)) !== null) {
-         const dateValue = match[20]; // Значение даты из тега <date>
+      let blockMatch;
+      while ((blockMatch = accountBlockPattern.exec(fileContent)) !== null) {
+         // Извлекаем блок текста, содержащий весь аккаунт
+         const accountBlock = blockMatch[0];
+         const title = blockMatch[1];
+         const id = blockMatch[2];
+         const dateValue = blockMatch[3] || '';
+
+         // Проверка идентификатора
+         if (!id) continue;
+
          let date_of_create;
-
-         if (dateValue === undefined) {
-            // Если тега <date> нет, устанавливаем текущую дату
-            date_of_create = new Date().toISOString();
-         } else if (dateValue.trim() === '') {
-            // Если тег <date> пустой, устанавливаем null
+         if (dateValue.trim() === '') {
             date_of_create = null;
          } else {
-            // Если в теге <date> есть значение, используем его
             date_of_create = dateValue.trim();
          }
 
-         const accountData = {
-            title: match[1],
-            id: match[2],
-            dr: match[3],
-            city: match[4],
-            skype: match[5],
-            icq: match[6],
-            fb: match[7],
-            od: match[8],
-            insta: match[9],
-            tw: match[10],
-            girl: match[11],
-            boy: match[12],
-            email: match[13],
-            tg: match[14],
-            tik: match[15],
-            of: match[16],
-            tel: match[17],
-            nvideo: match[18],
-            tags: match[19],
-            date_of_create, // Записываем значение для даты
+         // Функция для извлечения всех значений для определенного тега
+         const getAllValues = (tag) => {
+            const pattern = new RegExp(`<${tag}>(.*?)<\/${tag}>`, 'g');
+            const values = [];
+            let match;
+            while ((match = pattern.exec(accountBlock)) !== null) {
+               if (match[1].trim() !== '') {
+                  values.push(match[1].trim());
+               }
+            }
+            return values;
          };
 
-         // Если id присутствует, добавляем аккаунт в список
-         if (accountData.id) {
-            readyAccounts.push(accountData);
-         }
+         // Получаем первое значение (для одиночных полей)
+         const getFirstValue = (tag) => {
+            const values = getAllValues(tag);
+            return values.length > 0 ? values[0] : '';
+         };
+
+         const accountData = {
+            title,
+            id,
+            dr: getFirstValue('dr'),
+            city: getFirstValue('city'),
+            // Для всех социальных сетей получаем все значения
+            skype: getAllValues('skype'),
+            icq: getAllValues('icq'),
+            fb: getAllValues('fb'),
+            od: getAllValues('od'),
+            insta: getAllValues('insta'),
+            tw: getAllValues('tw'),
+            girl: getFirstValue('girl'),
+            boy: getFirstValue('boy'),
+            email: getAllValues('email'),
+            tg: getAllValues('tg'),
+            tik: getAllValues('tik'),
+            of: getAllValues('of'),
+            tel: getAllValues('tel'),
+            nvideo: getFirstValue('nvideo'),
+            tags: getFirstValue('tags'),
+            date_of_create,
+         };
+
+         readyAccounts.push(accountData);
       }
 
       // Если нет данных, возвращаем ошибку
@@ -179,7 +199,7 @@ function parseTxtFile(filePath) {
          return reject(new Error('Нет данных аккаунтов в файле'));
       }
 
-      resolve(readyAccounts); // Возвращаем массив данных для всех аккаунтов
+      resolve(readyAccounts);
    });
 }
 
@@ -190,8 +210,7 @@ app.get('/accounts', async (req, res) => {
       limit = parseInt(limit);
       const offset = (page - 1) * limit;
 
-      let query = `
-         SELECT DISTINCT a.id, a.name, a."City_id", a.date_of_create, a.date_of_birth, a.identificator, a.photo, a.check_video 
+      let queryBase = `
          FROM accounts a
          LEFT JOIN tags_detail td ON a.id = td.account_id
          LEFT JOIN tags t ON td.tag_id = t.id
@@ -254,15 +273,25 @@ app.get('/accounts', async (req, res) => {
          }
       }
 
-      // Применяем фильтры, если есть условия
-      if (conditions.length > 0) {
-         query += " WHERE " + conditions.join(" AND ");
-      }
+      // Применяем фильтры
+      let whereClause = conditions.length > 0 ? " WHERE " + conditions.join(" AND ") : "";
 
-      query += ` ORDER BY a.date_of_create DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+      // Получаем общее количество записей
+      const countQuery = `SELECT COUNT(DISTINCT a.id) AS total ${queryBase} ${whereClause}`;
+      const countResult = await pool.query(countQuery, queryParams);
+      const totalItems = countResult.rows[0].total;
+      const totalPages = Math.ceil(totalItems / limit);
+
+      // Получаем данные аккаунтов
+      let query = `
+         SELECT DISTINCT a.id, a.name, a."City_id", a.date_of_create, a.date_of_birth, a.identificator, a.photo, a.check_video 
+         ${queryBase} 
+         ${whereClause}
+         ORDER BY a.date_of_create DESC 
+         LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
+      `;
+
       queryParams.push(limit, offset);
-
-      // Выполнение запроса
       const result = await pool.query(query, queryParams);
       let accounts = result.rows;
 
@@ -270,7 +299,6 @@ app.get('/accounts', async (req, res) => {
       for (let account of accounts) {
          if (!account.photo) {
             const userDir = path.join(__dirname, 'fileBase', account.identificator);
-
             try {
                if (fs.existsSync(userDir)) {
                   const files = fs.readdirSync(userDir).filter(file => /\.(jpg|jpeg|png|gif)$/i.test(file));
@@ -285,7 +313,11 @@ app.get('/accounts', async (req, res) => {
          }
       }
 
-      res.json(accounts);
+      res.json({
+         accounts,
+         totalPages
+      });
+
    } catch (err) {
       console.error('Error:', err);
       res.status(500).json({ error: 'Server error', message: err.message });
@@ -296,23 +328,27 @@ app.get('/account', async (req, res) => {
    try {
       const { id } = req.query;
 
+      // Получаем данные аккаунта
       const userQuery = await pool.query("SELECT * FROM accounts WHERE Id = $1", [id]);
       if (userQuery.rows.length === 0) {
          return res.status(400).json({ message: "Пользователь не найден" });
       }
       const user = userQuery.rows[0];
 
+      // Получаем данные города
       const cityQuery = await pool.query(`SELECT * FROM city WHERE id = $1`, [user.City_id]);
       const city = cityQuery.rows[0];
 
+      // Получаем теги
       const tagsQuery = await pool.query(`
-         SELECT tags.id, tags.name_ru, tags.name_eu 
+         SELECT tags.id, tags.name_ru, tags.name_eu
          FROM tags
          JOIN tags_detail ON tags.id = tags_detail.tag_id
          WHERE tags_detail.account_id = $1
       `, [id]);
       const tags = tagsQuery.rows;
 
+      // Получаем данные о соцсетях
       const socialsQuery = await pool.query(`
          SELECT socials.id, socials.type_social_id, socials.text, socials_type.name AS social_name
          FROM socials
@@ -322,9 +358,11 @@ app.get('/account', async (req, res) => {
       `, [id]);
       const socials = socialsQuery.rows;
 
+      // Получаем рейтинг
       const ratingQuery = await pool.query(`SELECT * FROM rating WHERE account_id = $1`, [id]);
       const rating = ratingQuery.rows;
 
+      // Получаем комментарии
       const commentsQuery = await pool.query(`
          SELECT comments.*, users.login AS author_nickname
          FROM comments
@@ -333,17 +371,24 @@ app.get('/account', async (req, res) => {
       `, [id]);
       const commentsTree = buildCommentTree(commentsQuery.rows);
 
+      // Получаем детали пользователя
       const userDetailsQuery = await pool.query(`SELECT * FROM users WHERE login = $1`, [user.login]);
       const userDetails = userDetailsQuery.rows[0];
 
-      // 📂 Читаем файлы из папки fileBase/<id>
-      const filesDirectory = path.join(__dirname, 'fileBase', user.identificator);
+      // 📂 Получаем файлы с SFTP-сервера вместо локальной директории
+      const remotePath = user.identificator;
       let files = [];
+      try {
+         // Получаем список файлов из директории пользователя
+         const filesList = await listFiles(remotePath);
 
-      if (fs.existsSync(filesDirectory)) {
-         files = fs.readdirSync(filesDirectory)
-            .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('4')) // Добавляем MP4
-            .map(file => `/uploads/${user.identificator}/${file}`);
+         // Фильтруем только изображения и видео
+         files = filesList
+            .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.mp4'))
+            .map(file => getPublicUrl(`/${remotePath}/${file}`));
+      } catch (fileErr) {
+         console.error('Error getting files from SFTP:', fileErr);
+         // Продолжаем выполнение, даже если не удалось получить файлы
       }
 
       // Собираем финальный объект
@@ -355,11 +400,10 @@ app.get('/account', async (req, res) => {
          rating: rating,
          comments: commentsTree,
          userDetails: userDetails,
-         files: files  // 📂 Добавляем файлы
+         files: files  // 📂 Добавляем файлы с SFTP
       };
 
       res.json(fullAccountInfo);
-
    } catch (err) {
       console.error('Error:', err);
       res.status(500).json({ error: 'Server error', message: err.message });
@@ -368,16 +412,19 @@ app.get('/account', async (req, res) => {
 
 app.get('/cities', authMiddleware, async (req, res) => {
    try {
+      const currentDate = new Date().toISOString().split('T')[0]; // Получаем текущую дату в формате YYYY-MM-DD
+
       const result = await pool.query(`
-         SELECT 
-            c.id AS City_ID, 
-            c.name_ru AS City_Name, 
+         SELECT
+            c.id AS City_ID,
+            c.name_ru AS City_Name,
             COUNT(a.id) AS Account_Count
          FROM accounts a
          JOIN city c ON a."City_id" = c.id
+         WHERE (a.date_of_create IS NULL OR a.date_of_create <= $1)
          GROUP BY c.id, c.name_ru
          ORDER BY Account_Count DESC;
-      `);
+      `, [currentDate]);
 
       res.json(result.rows);
    } catch (err) {
@@ -388,13 +435,20 @@ app.get('/cities', authMiddleware, async (req, res) => {
 
 app.get('/tags', async (req, res) => {
    try {
+      const currentDate = new Date().toISOString().split('T')[0]; // Получаем текущую дату в формате YYYY-MM-DD
+
       const result = await pool.query(`
-            SELECT t.id, t.name_ru, COUNT(td.tag_id) AS usage_count
-            FROM tags t
-            LEFT JOIN tags_detail td ON t.id = td.tag_id
-            GROUP BY t.id, t.name_ru
-            ORDER BY usage_count DESC;
-         `);
+         SELECT 
+            t.id, 
+            t.name_ru, 
+            COUNT(td.tag_id) AS usage_count
+         FROM tags t
+         LEFT JOIN tags_detail td ON t.id = td.tag_id
+         LEFT JOIN accounts a ON td.account_id = a.id
+         WHERE (a.date_of_create IS NULL OR a.date_of_create <= $1 OR a.id IS NULL)
+         GROUP BY t.id, t.name_ru
+         ORDER BY usage_count DESC;
+      `, [currentDate]);
 
       res.json(result.rows);
    } catch (err) {
@@ -1153,29 +1207,62 @@ app.get("/get-messages", async (req, res) => {
    }
 });
 
-app.get('/get-user', async (req, res) => {
+app.get('/users', async (req, res) => {
    try {
-      const { login } = req.query;
+      const { page = 1, login } = req.query;
+      const limit = 20;
+      const offset = (page - 1) * limit;
 
-      if (!login) {
-         return res.status(400).json({ error: 'Логин обязателен' });
-      }
-
-      const query = `
+      // Базовый SQL-запрос
+      let query = `
          SELECT u.id, u.login, u.avatar, u.date_of_create, u.mail, u.session_id, 
-               COALESCE(r.name, '') AS role
+                COALESCE(r.name, '') AS role
          FROM users u
          LEFT JOIN roles r ON u.id = r.user_id
-         WHERE u.login = $1
       `;
+      let countQuery = `SELECT COUNT(*) FROM users`;
+      let values = [];
+      let countValues = [];
 
-      const { rows } = await pool.query(query, [login]);
-
-      if (rows.length === 0) {
-         return res.status(404).json({ error: 'Пользователь не найден' });
+      // Фильтр по логину, если login передан и не пустой
+      if (login && login.trim() !== '') {
+         query += ` WHERE u.login ILIKE $1`;
+         countQuery += ` WHERE login ILIKE $1`;
+         values.push(`%${login}%`);
+         countValues.push(`%${login}%`);
       }
 
-      res.json(rows[0]);
+      query += ` ORDER BY u.id LIMIT $${values.length + 1} OFFSET $${values.length + 2}`;
+      values.push(limit, offset);
+
+      const { rows: users } = await pool.query(query, values);
+      const { rows } = await pool.query(countQuery, countValues);
+      const totalUsers = parseInt(rows[0].count, 10);
+      const totalPages = Math.ceil(totalUsers / limit);
+
+      res.json({ users, totalPages });
+   } catch (err) {
+      res.status(500).json({ error: 'Ошибка сервера', message: err.message });
+   }
+});
+
+app.delete('/users-delete', async (req, res) => {
+   try {
+      const { users } = req.body;
+
+      if (!Array.isArray(users) || users.length === 0) {
+         return res.status(400).json({ error: 'Неверный формат запроса, массив users обязателен' });
+      }
+
+      // Извлекаем ID пользователей
+      const userIds = users.map(user => user.id);
+
+      // Удаляем пользователей с переданными ID
+      const query = `DELETE FROM users WHERE id = ANY($1) RETURNING id`;
+
+      const { rows } = await pool.query(query, [userIds]);
+
+      res.json({ message: 'Пользователи удалены', deletedUsers: rows.map(row => row.id) });
    } catch (err) {
       res.status(500).json({ error: 'Ошибка сервера', message: err.message });
    }
@@ -1238,28 +1325,6 @@ app.post("/add-role", async (req, res) => {
    }
 });
 
-app.delete("/delete-user", async (req, res) => {
-   try {
-      const { user_id } = req.body;
-
-      if (!user_id) {
-         return res.status(400).json({ error: "user_id обязателен" });
-      }
-
-      const query = `DELETE FROM users WHERE id = $1 RETURNING *;`;
-
-      const { rows } = await pool.query(query, [user_id]);
-
-      if (rows.length === 0) {
-         return res.status(404).json({ error: "Пользователь не найден" });
-      }
-
-      res.json({ message: "Пользователь успешно удалён", data: rows[0] });
-   } catch (err) {
-      res.status(500).json({ error: "Ошибка сервера", message: err.message });
-   }
-});
-
 app.post("/upload-file", upload.single("file"), async (req, res) => {
    try {
       if (!req.file) return res.status(400).json({ error: "Файл не найден" });
@@ -1268,7 +1333,7 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
 
       console.log(accounts);
 
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(req.file.path); // Удаляем временный файл
 
       if (!Array.isArray(accounts)) {
          return res.status(400).json({ error: "accounts не является массивом" });
@@ -1283,15 +1348,16 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
          let cityId = cityResult.rows.length ? cityResult.rows[0].id : null;
 
          if (!cityId && account.city) {
-            let insertCity = await pool.query(
-               `INSERT INTO city (name_ru, name_eu) VALUES ($1, $2) 
-               ON CONFLICT (name_ru) DO NOTHING RETURNING id`,
-               [account.city, account.city]
-            );
-
-            cityId = insertCity.rows.length ? insertCity.rows[0].id : null;
-            if (!cityId) {
-               cityId = (await pool.query("SELECT id FROM city WHERE name_ru = $1", [account.city])).rows[0].id;
+            // Проверяем существование перед вставкой, избегая ON CONFLICT
+            const existingCity = await pool.query("SELECT id FROM city WHERE name_ru = $1", [account.city]);
+            if (existingCity.rows.length === 0) {
+               let insertCity = await pool.query(
+                  "INSERT INTO city (name_ru, name_eu) VALUES ($1, $2) RETURNING id",
+                  [account.city, account.city]
+               );
+               cityId = insertCity.rows[0].id;
+            } else {
+               cityId = existingCity.rows[0].id;
             }
          }
 
@@ -1303,52 +1369,88 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
             dateOfBirth = `${birthYear}-01-01`;
          }
 
-         const accountResult = await pool.query(
-            `INSERT INTO accounts (name, identificator, check_video, "City_id", date_of_create, date_of_birth) 
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-            [
-               account.title,
-               identificator,
-               account.nvideo === "1" ? 1 : 0,
-               cityId,
-               account.date_of_create == null ? null : account.date_of_create ? account.date_of_create : new Date().toISOString(),
-               dateOfBirth
-            ]
+         // Проверяем существует ли уже аккаунт с таким identificator
+         const existingAccount = await pool.query(
+            "SELECT id FROM accounts WHERE identificator = $1",
+            [identificator]
          );
 
-         const accountId = accountResult.rows[0].id;
+         let accountId;
+         if (existingAccount.rows.length > 0) {
+            // Обновляем существующий аккаунт
+            const updateResult = await pool.query(
+               "UPDATE accounts SET name = $1, check_video = $2, \"City_id\" = $3, date_of_create = $4, date_of_birth = $5 WHERE identificator = $6 RETURNING id",
+               [
+                  account.title,
+                  account.nvideo === "1" ? 1 : 0,
+                  cityId,
+                  account.date_of_create == null ? null : account.date_of_create ? account.date_of_create : new Date().toISOString(),
+                  dateOfBirth,
+                  identificator
+               ]
+            );
+            accountId = updateResult.rows[0].id;
+         } else {
+            // Создаем новый аккаунт
+            const accountResult = await pool.query(
+               "INSERT INTO accounts (name, identificator, check_video, \"City_id\", date_of_create, date_of_birth) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+               [
+                  account.title,
+                  identificator,
+                  account.nvideo === "1" ? 1 : 0,
+                  cityId,
+                  account.date_of_create == null ? null : account.date_of_create ? account.date_of_create : new Date().toISOString(),
+                  dateOfBirth
+               ]
+            );
+            accountId = accountResult.rows[0].id;
+         }
 
          // === Добавление тегов ===
          let tags = account.tags || "";
          tags = tags.split(",").map(tag => tag.trim()).filter(tag => tag.length > 0);
 
          for (const tag of tags) {
+            // Проверяем существование тега
             let tagResult = await pool.query("SELECT id FROM tags WHERE name_ru = $1", [tag]);
+            let tagId;
 
-            let tagId = tagResult.rows.length ? tagResult.rows[0].id : null;
-
-            if (!tagId) {
+            if (tagResult.rows.length === 0) {
+               // Создаем новый тег
                let insertTagResult = await pool.query(
-                  `INSERT INTO tags (name_ru, name_eu) 
-                   VALUES ($1, $1) 
-                   RETURNING id`,
+                  "INSERT INTO tags (name_ru, name_eu) VALUES ($1, $1) RETURNING id",
                   [tag]
                );
                tagId = insertTagResult.rows[0].id;
+            } else {
+               tagId = tagResult.rows[0].id;
             }
 
-            await pool.query(
-               `INSERT INTO tags_detail (tag_id, account_id) 
-                VALUES ($1, $2) 
-                ON CONFLICT (tag_id, account_id) DO NOTHING`,
+            // Проверяем, существует ли уже связь между тегом и аккаунтом
+            const existingTagDetail = await pool.query(
+               "SELECT 1 FROM tags_detail WHERE tag_id = $1 AND account_id = $2",
                [tagId, accountId]
             );
+
+            if (existingTagDetail.rows.length === 0) {
+               // Создаем связь, только если её ещё нет
+               await pool.query(
+                  "INSERT INTO tags_detail (tag_id, account_id) VALUES ($1, $2)",
+                  [tagId, accountId]
+               );
+            }
          }
 
-         // === Создание папки для аккаунта ===
-         const folderPath = path.join(__dirname, "fileBase", identificator);
-         if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
+         // === Создание папки для аккаунта на SFTP сервере ===
+         try {
+            await createDirectory(identificator);
+            console.log(`Создана директория на SFTP: ${identificator}`);
+         } catch (sftpError) {
+            console.error(`Ошибка создания директории на SFTP для ${identificator}:`, sftpError);
+            // Продолжаем выполнение, не прерывая процесс из-за ошибки с SFTP
+         }
 
+         // === Обработка социальных сетей ===
          const socialTypes = {
             fb: "fb",
             od: "od",
@@ -1359,41 +1461,61 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
             tg: "tg",
             tik: "tik",
             of: "of",
-            tel: "tel"
+            tel: "tel",
+            skype: "skype"
          };
 
-         for (const [key, identificator] of Object.entries(socialTypes)) {
-            if (account[key]) {
-               let socialTypeResult = await pool.query("SELECT id FROM socials_type WHERE identificator = $1", [identificator]);
-               let typeSocialId = socialTypeResult.rows.length ? socialTypeResult.rows[0].id : null;
+         for (const [key, socialIdentificator] of Object.entries(socialTypes)) {
+            // Получаем все значения для текущего типа социальной сети
+            const values = account[key];
 
-               if (typeSocialId) {
-                  let insertSocialResult = await pool.query(
-                     `INSERT INTO socials (type_social_id, text) 
-                      VALUES ($1, $2) 
-                      ON CONFLICT (type_social_id, text) DO NOTHING RETURNING id`,
-                     [typeSocialId, account[key]]
+            if (!values || values.length === 0) continue;
+
+            // Получаем id типа социальной сети
+            let socialTypeResult = await pool.query(
+               "SELECT id FROM socials_type WHERE identificator = $1",
+               [socialIdentificator]
+            );
+
+            if (socialTypeResult.rows.length === 0) continue;
+
+            const typeSocialId = socialTypeResult.rows[0].id;
+
+            // Обрабатываем каждое значение для данного типа социальной сети
+            for (const value of values) {
+               if (!value || value.trim() === '') continue;
+
+               // Проверяем, существует ли уже такая запись в socials
+               const existingSocial = await pool.query(
+                  "SELECT id FROM socials WHERE type_social_id = $1 AND text = $2",
+                  [typeSocialId, value]
+               );
+
+               let socialId;
+
+               if (existingSocial.rows.length > 0) {
+                  socialId = existingSocial.rows[0].id;
+               } else {
+                  // Добавляем новую запись, если не существует
+                  const insertSocialResult = await pool.query(
+                     "INSERT INTO socials (type_social_id, text) VALUES ($1, $2) RETURNING id",
+                     [typeSocialId, value]
                   );
+                  socialId = insertSocialResult.rows[0].id;
+               }
 
+               // Проверяем существует ли уже связь между аккаунтом и социальной сетью
+               const existingSocialDetail = await pool.query(
+                  "SELECT 1 FROM socials_detail WHERE account_id = $1 AND socials_id = $2",
+                  [accountId, socialId]
+               );
 
-                  let socialId = insertSocialResult.rows.length > 0 ? insertSocialResult.rows[0].id : null;
-
-                  if (!socialId) {
-                     let existingSocial = await pool.query(
-                        `SELECT id FROM socials WHERE type_social_id = $1 AND text = $2`,
-                        [typeSocialId, account[key]]
-                     );
-                     socialId = existingSocial.rows[0]?.id;
-                  }
-
-                  if (socialId) {
-                     await pool.query(
-                        `INSERT INTO socials_detail (account_id, socials_id) 
-                         VALUES ($1, $2)`,
-                        [accountId, socialId]
-                     );
-                  }
-
+               if (existingSocialDetail.rows.length === 0) {
+                  // Создаем связь только если её еще нет
+                  await pool.query(
+                     "INSERT INTO socials_detail (account_id, socials_id) VALUES ($1, $2)",
+                     [accountId, socialId]
+                  );
                }
             }
          }
@@ -1406,19 +1528,23 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
    }
 });
 
-app.post("/account-edit-media", upload.array("files"), (req, res) => {
+app.post("/account-edit-media", upload.array("files"), async (req, res) => {
    try {
       const id = req.query.id;
-
       if (!id) {
          return res.status(400).json({ success: false, message: "Отсутствует id" });
       }
 
-      const folderPath = path.join(__dirname, "fileBase", id);
-      if (!fs.existsSync(folderPath)) {
-         fs.mkdirSync(folderPath, { recursive: true });
+      // Создаем директорию на SFTP, если она не существует
+      try {
+         await createDirectory(id);
+         console.log(`Директория проверена/создана на SFTP: ${id}`);
+      } catch (dirError) {
+         console.error(`Ошибка при создании директории на SFTP для ${id}:`, dirError);
+         return res.status(500).json({ success: false, message: "Ошибка при работе с SFTP" });
       }
 
+      // Обрабатываем входящие ссылки
       let incomingLinks = [];
       if (req.body.links) {
          try {
@@ -1429,57 +1555,104 @@ app.post("/account-edit-media", upload.array("files"), (req, res) => {
          }
       }
 
-      // Получаем файлы в папке
-      let existingFiles = fs.readdirSync(folderPath);
+      try {
+         // Получаем файлы в папке на SFTP
+         let existingFiles = await listFiles(id);
+         console.log(`Существующие файлы в директории ${id}:`, existingFiles);
 
-      // Получаем все занятые номера
-      let usedNumbers = existingFiles.map(file => parseInt(file.split(".")[0])).filter(num => !isNaN(num));
+         // Получаем все занятые номера
+         let usedNumbers = existingFiles
+            .map(file => parseInt(file.split(".")[0]))
+            .filter(num => !isNaN(num));
 
-      // Функция для поиска первого свободного номера
-      const getNextNumber = (usedNumbers, start) => {
-         let number = start;
-         while (usedNumbers.includes(number)) number++;
-         usedNumbers.push(number); // Добавляем в занятые, чтобы избежать дублирования
-         return number;
-      };
+         // Функция для поиска первого свободного номера
+         const getNextNumber = (usedNumbers, start) => {
+            let number = start;
+            while (usedNumbers.includes(number)) number++;
+            usedNumbers.push(number); // Добавляем в занятые, чтобы избежать дублирования
+            return number;
+         };
 
-      let uploadedFiles = [];
-
-      req.files.forEach((file) => {
-         let ext = path.extname(file.originalname).toLowerCase();
-         let newNumber = /\.(mp4|mov|avi|mkv)$/i.test(ext)
-            ? getNextNumber(usedNumbers, 200)  // Видео от 200 и выше
-            : getNextNumber(usedNumbers, 1);   // Картинки от 1 до 199
-
-         let newFileName = `${newNumber}${ext}`;
-         let newPath = path.join(folderPath, newFileName);
-
-         fs.renameSync(file.path, newPath);
-         uploadedFiles.push(`/fileBase/${id}/${newFileName}`);
-      });
-
-      // Обновляем списки файлов
-      existingFiles = fs.readdirSync(folderPath);
-      let incomingFileNames = incomingLinks.map(link => path.basename(link));
-      let uploadedFileNames = uploadedFiles.map(link => path.basename(link));
-
-      // Удаляем файлы, которых нет в `incomingFileNames` и `uploadedFileNames`
-      existingFiles.forEach((file) => {
-         if (!incomingFileNames.includes(file) && !uploadedFileNames.includes(file)) {
+         // Загружаем новые файлы на SFTP
+         let uploadedFiles = [];
+         const uploadPromises = req.files.map(async (file) => {
             try {
-               fs.unlinkSync(path.join(folderPath, file));
-            } catch (err) {
+               let ext = path.extname(file.originalname).toLowerCase();
+               let newNumber = /\.(mp4|mov|avi|mkv)$/i.test(ext)
+                  ? getNextNumber(usedNumbers, 200)  // Видео от 200 и выше
+                  : getNextNumber(usedNumbers, 1);   // Картинки от 1 до 199
+
+               let newFileName = `${newNumber}${ext}`;
+
+               // Загружаем файл на SFTP
+               const remotePath = await uploadFile(file.path, id, newFileName);
+               console.log(`Файл загружен на SFTP: ${remotePath}`);
+
+               // Создаем публичную ссылку на файл
+               const publicUrl = getPublicUrl(remotePath);
+               uploadedFiles.push(publicUrl);
+
+               // Удаляем временный файл
+               fs.unlinkSync(file.path);
+
+               return publicUrl;
+            } catch (uploadError) {
+               console.error(`Ошибка при загрузке файла ${file.originalname}:`, uploadError);
+               // Удаляем временный файл даже при ошибке
+               if (fs.existsSync(file.path)) {
+                  fs.unlinkSync(file.path);
+               }
+               throw uploadError;
+            }
+         });
+
+         // Ждем завершения всех загрузок
+         await Promise.all(uploadPromises);
+
+         // Получаем обновленный список файлов
+         existingFiles = await listFiles(id);
+
+         // Получаем имена файлов из ссылок
+         let incomingFileNames = incomingLinks.map(link => path.basename(link));
+         let uploadedFileNames = uploadedFiles.map(link => path.basename(link));
+
+         // Удаляем файлы, которых нет в incomingFileNames и uploadedFileNames
+         const deletePromises = existingFiles.map(async (file) => {
+            if (!incomingFileNames.includes(file) && !uploadedFileNames.includes(file)) {
+               try {
+                  await deleteFile(`${id}/${file}`);
+                  console.log(`Файл удален с SFTP: ${id}/${file}`);
+               } catch (deleteError) {
+                  console.error(`Ошибка при удалении файла ${file}:`, deleteError);
+               }
+            }
+         });
+
+         // Ждем завершения всех удалений
+         await Promise.all(deletePromises);
+
+         // Получаем финальный список файлов и формируем публичные ссылки
+         const updatedFiles = await listFiles(id);
+         const updatedFileUrls = updatedFiles.map(file => getPublicUrl(`/fileBase/${id}/${file}`));
+
+         res.json({ success: true, message: "Файлы загружены", files: updatedFileUrls });
+      } catch (sftpError) {
+         console.error(`Ошибка при работе с SFTP:`, sftpError);
+         return res.status(500).json({ success: false, message: "Ошибка при работе с SFTP", error: sftpError.message });
+      }
+   } catch (error) {
+      console.error("Общая ошибка:", error);
+
+      // Удаляем временные файлы при ошибке
+      if (req.files && Array.isArray(req.files)) {
+         for (const file of req.files) {
+            if (fs.existsSync(file.path)) {
+               fs.unlinkSync(file.path);
             }
          }
-      });
+      }
 
-      // Возвращаем список файлов после обновления
-      const updatedFiles = fs.readdirSync(folderPath).map(file => `/fileBase/${id}/${file}`);
-
-      res.json({ success: true, message: "Файлы загружены", files: updatedFiles });
-   } catch (error) {
-      console.error("Ошибка:", error);
-      res.status(500).json({ success: false, message: "Ошибка на сервере" });
+      res.status(500).json({ success: false, message: "Ошибка на сервере", error: error.message });
    }
 });
 
@@ -1508,6 +1681,44 @@ app.delete("/delete-account", async (req, res) => {
       res.json({ message: "Аккаунт и его файлы успешно удалены" });
    } catch (error) {
       console.error("Ошибка при удалении аккаунта:", error);
+      res.status(500).json({ error: "Ошибка сервера", message: error.message });
+   }
+});
+
+app.delete("/delete-accounts", async (req, res) => {
+   try {
+      const { account_ids } = req.body;
+
+      if (!Array.isArray(account_ids) || account_ids.length === 0) {
+         return res.status(400).json({ error: "account_ids должен быть массивом с хотя бы одним ID" });
+      }
+
+      // Получаем идентификаторы аккаунтов перед удалением
+      const result = await pool.query(
+         `SELECT identificator FROM accounts WHERE id = ANY($1);`,
+         [account_ids]
+      );
+
+      const account_identificators = result.rows.map(row => row.identificator);
+
+      if (account_identificators.length === 0) {
+         return res.status(404).json({ error: "Ни один аккаунт не найден" });
+      }
+
+      // Удаляем записи из базы данных
+      const { rowCount } = await pool.query(`DELETE FROM accounts WHERE id = ANY($1);`, [account_ids]);
+
+      // Удаляем папки с файлами
+      for (const identificator of account_identificators) {
+         const folderPath = path.join(__dirname, "fileBase", identificator);
+         if (fs.existsSync(folderPath)) {
+            fs.rmSync(folderPath, { recursive: true, force: true });
+         }
+      }
+
+      res.json({ message: `Удалено ${rowCount} аккаунтов и их файлы` });
+   } catch (error) {
+      console.error("Ошибка при удалении аккаунтов:", error);
       res.status(500).json({ error: "Ошибка сервера", message: error.message });
    }
 });
@@ -1612,7 +1823,7 @@ app.post("/update-account-date", async (req, res) => {
 
 app.put("/update-account", async (req, res) => {
    try {
-      const { id, name, city, tags } = req.body;
+      const { id, name, city, tags, socials } = req.body;
 
       if (!id) {
          return res.status(400).json({ error: "ID аккаунта обязателен" });
@@ -1622,10 +1833,7 @@ app.put("/update-account", async (req, res) => {
 
       // 1. Обновление имени аккаунта
       if (name) {
-         await pool.query(
-            `UPDATE accounts SET name = $1 WHERE id = $2`,
-            [name, id]
-         );
+         await pool.query(`UPDATE accounts SET name = $1 WHERE id = $2`, [name, id]);
       }
 
       let cityId = null;
@@ -1647,16 +1855,12 @@ app.put("/update-account", async (req, res) => {
             cityId = newCity.rows[0].id;
          }
 
-         await pool.query(
-            `UPDATE accounts SET "City_id" = $1 WHERE id = $2`,
-            [cityId, id]
-         );
+         await pool.query(`UPDATE accounts SET "City_id" = $1 WHERE id = $2`, [cityId, id]);
       }
 
       // 3. Работа с тегами
       const tagList = tags ? tags.split(",").map((t) => t.trim()) : [];
 
-      // Получаем все текущие теги аккаунта
       const existingTags = await pool.query(
          `SELECT tag_id FROM tags_detail WHERE account_id = $1`,
          [id]
@@ -1668,7 +1872,6 @@ app.put("/update-account", async (req, res) => {
       for (const tag of tagList) {
          let tagId;
 
-         // Проверяем, существует ли тег
          const tagResult = await pool.query(
             `SELECT id FROM tags WHERE name_ru = $1 OR name_eu = $1`,
             [tag]
@@ -1677,7 +1880,6 @@ app.put("/update-account", async (req, res) => {
          if (tagResult.rows.length > 0) {
             tagId = tagResult.rows[0].id;
          } else {
-            // Добавляем новый тег
             const newTag = await pool.query(
                `INSERT INTO tags (name_ru, name_eu) VALUES ($1, $1) RETURNING id`,
                [tag]
@@ -1687,14 +1889,12 @@ app.put("/update-account", async (req, res) => {
 
          newTagIds.push(tagId);
 
-         // Проверяем, есть ли связь с аккаунтом
          const tagDetailResult = await pool.query(
             `SELECT id FROM tags_detail WHERE tag_id = $1 AND account_id = $2`,
             [tagId, id]
          );
 
          if (tagDetailResult.rows.length === 0) {
-            // Если нет, создаем связь
             await pool.query(
                `INSERT INTO tags_detail (tag_id, account_id) VALUES ($1, $2)`,
                [tagId, id]
@@ -1702,7 +1902,6 @@ app.put("/update-account", async (req, res) => {
          }
       }
 
-      // 4. Удаление старых тегов, которые не переданы в запросе
       const tagsToRemove = existingTagIds.filter(tagId => !newTagIds.includes(tagId));
 
       if (tagsToRemove.length > 0) {
@@ -1712,11 +1911,44 @@ app.put("/update-account", async (req, res) => {
          );
       }
 
-      await pool.query("COMMIT"); // Фиксируем изменения
+      // 4. Работа с соцсетями: удаление старых, добавление новых
+      await pool.query(`DELETE FROM socials_detail WHERE account_id = $1`, [id]);
+
+      for (const social of socials) {
+         const { type_social_id, text } = social;
+
+         if (!type_social_id || !text) {
+            continue; // Пропускаем добавление, если нет данных
+         }
+
+         let socialResult = await pool.query(
+            `SELECT id FROM socials WHERE type_social_id = $1 AND text = $2`,
+            [type_social_id, text]
+         );
+
+         let socialId;
+
+         if (socialResult.rows.length > 0) {
+            socialId = socialResult.rows[0].id;
+         } else {
+            const newSocial = await pool.query(
+               `INSERT INTO socials (type_social_id, text) VALUES ($1, $2) RETURNING id`,
+               [type_social_id, text]
+            );
+            socialId = newSocial.rows[0].id;
+         }
+
+         await pool.query(
+            `INSERT INTO socials_detail (account_id, socials_id) VALUES ($1, $2)`,
+            [id, socialId]
+         );
+      }
+
+      await pool.query("COMMIT");
 
       res.json({ message: "Аккаунт успешно обновлен" });
    } catch (err) {
-      await pool.query("ROLLBACK"); // Откатываем изменения в случае ошибки
+      await pool.query("ROLLBACK");
       console.error("Ошибка:", err);
       res.status(500).json({ error: "Ошибка сервера", message: err.message });
    }
