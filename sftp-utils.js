@@ -280,12 +280,58 @@ async function testConnection() {
    }
 }
 
+
+async function deleteRemoteDirectory(remotePath) {
+   const sftp = await getSftpClient();
+   try {
+      const fullPath = path.posix.join(BASE_PATH, remotePath);
+      logSftp('delete-dir', `Удаление директории: ${fullPath}`);
+
+      // Проверяем существование директории
+      const exists = await sftp.exists(fullPath);
+      if (!exists) {
+         logSftp('delete-dir', `Директория не существует: ${fullPath}`);
+         return;
+      }
+
+      // Получаем список файлов в директории
+      const list = await sftp.list(fullPath);
+
+      // Удаляем все файлы и вложенные директории
+      for (const item of list) {
+         const itemPath = path.posix.join(fullPath, item.name);
+
+         if (item.type === '-') {
+            // Если это файл
+            await sftp.delete(itemPath);
+            logSftp('delete-dir', `Удален файл: ${itemPath}`);
+         } else if (item.type === 'd') {
+            // Если это директория и это не "." или ".."
+            if (item.name !== '.' && item.name !== '..') {
+               // Рекурсивно удаляем вложенную директорию
+               await deleteRemoteDirectory(path.posix.join(remotePath, item.name));
+            }
+         }
+      }
+
+      // Удаляем саму директорию после очистки содержимого
+      await sftp.rmdir(fullPath);
+      logSftp('delete-dir', `Директория успешно удалена: ${fullPath}`);
+   } catch (error) {
+      logSftp('error', `Ошибка удаления директории ${remotePath}: ${error.message}`);
+      throw error;
+   } finally {
+      releaseSftpClient(sftp);
+   }
+}
+
 export {
    createDirectory,
    exists,
    listFiles,
    uploadFile,
    deleteFile,
+   deleteRemoteDirectory,
    getPublicUrl,
    testConnection,
    getSftpClient,

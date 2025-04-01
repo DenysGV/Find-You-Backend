@@ -1786,39 +1786,9 @@ app.get('/fileBase/*', async (req, res) => {
    }
 });
 
-app.delete("/delete-account", async (req, res) => {
-   try {
-      const { account_id, account_identificator } = req.body;
-      if (!account_id) {
-         return res.status(400).json({ error: "account_id обязателен" });
-      }
-
-      // Удаляем запись из базы данных
-      const { rowCount } = await pool.query(`DELETE FROM accounts WHERE id = $1;`, [account_id]);
-
-      if (rowCount === 0) {
-         return res.status(404).json({ error: "Аккаунт не найден" });
-      }
-
-      // Путь к папке аккаунта
-      const folderPath = path.join(__dirname, "fileBase", account_identificator);
-
-      // Проверяем, существует ли папка
-      if (fs.existsSync(folderPath)) {
-         fs.rmSync(folderPath, { recursive: true, force: true }); // Удаляем папку и её содержимое
-      }
-
-      res.json({ message: "Аккаунт и его файлы успешно удалены" });
-   } catch (error) {
-      console.error("Ошибка при удалении аккаунта:", error);
-      res.status(500).json({ error: "Ошибка сервера", message: error.message });
-   }
-});
-
 app.delete("/delete-accounts", async (req, res) => {
    try {
       const { account_ids } = req.body;
-
       if (!Array.isArray(account_ids) || account_ids.length === 0) {
          return res.status(400).json({ error: "account_ids должен быть массивом с хотя бы одним ID" });
       }
@@ -1828,9 +1798,7 @@ app.delete("/delete-accounts", async (req, res) => {
          `SELECT identificator FROM accounts WHERE id = ANY($1);`,
          [account_ids]
       );
-
       const account_identificators = result.rows.map(row => row.identificator);
-
       if (account_identificators.length === 0) {
          return res.status(404).json({ error: "Ни один аккаунт не найден" });
       }
@@ -1838,13 +1806,68 @@ app.delete("/delete-accounts", async (req, res) => {
       // Удаляем записи из базы данных
       const { rowCount } = await pool.query(`DELETE FROM accounts WHERE id = ANY($1);`, [account_ids]);
 
-      // Удаляем папки с файлами
-      for (const identificator of account_identificators) {
-         const folderPath = path.join(__dirname, "fileBase", identificator);
-         if (fs.existsSync(folderPath)) {
-            fs.rmSync(folderPath, { recursive: true, force: true });
+      // Создаем функцию для удаления директории на SFTP сервере
+      async function deleteRemoteDirectory(remotePath) {
+         const sftp = await getSftpClient();
+         try {
+            const fullPath = path.posix.join(BASE_PATH, remotePath);
+            console.log(`[SFTP delete] Удаление директории на SFTP: ${fullPath}`);
+
+            // Проверяем существование директории
+            const exists = await sftp.exists(fullPath);
+            if (!exists) {
+               console.log(`[SFTP delete] Директория не существует: ${fullPath}`);
+               return;
+            }
+
+            // Получаем список файлов в директории
+            const list = await sftp.list(fullPath);
+
+            // Удаляем все файлы и вложенные директории
+            for (const item of list) {
+               const itemPath = path.posix.join(fullPath, item.name);
+
+               if (item.type === '-') {
+                  // Если это файл
+                  await sftp.delete(itemPath);
+                  console.log(`[SFTP delete] Удален файл: ${itemPath}`);
+               } else if (item.type === 'd') {
+                  // Если это директория и это не "." или ".."
+                  if (item.name !== '.' && item.name !== '..') {
+                     // Рекурсивно удаляем вложенную директорию
+                     await deleteRemoteDirectory(path.posix.join(remotePath, item.name));
+                  }
+               }
+            }
+
+            // Удаляем саму директорию после очистки содержимого
+            await sftp.rmdir(fullPath);
+            console.log(`[SFTP delete] Директория успешно удалена: ${fullPath}`);
+         } catch (error) {
+            console.error(`[SFTP error] Ошибка удаления директории ${remotePath}: ${error.message}`);
+            throw error;
+         } finally {
+            releaseSftpClient(sftp);
          }
       }
+
+      // Удаляем папки с файлами как на локальном сервере, так и на SFTP
+      const deletionPromises = account_identificators.map(async (identificator) => {
+         // Удаляем папку на SFTP сервере
+         try {
+            await deleteRemoteDirectory(identificator);
+         } catch (error) {
+            console.error(`Ошибка при удалении папки на SFTP для ${identificator}:`, error);
+         }
+
+         // Удаляем локальную папку (если она существует)
+         const localFolderPath = path.join(__dirname, "fileBase", identificator);
+         if (fs.existsSync(localFolderPath)) {
+            fs.rmSync(localFolderPath, { recursive: true, force: true });
+         }
+      });
+
+      await Promise.all(deletionPromises);
 
       res.json({ message: `Удалено ${rowCount} аккаунтов и их файлы` });
    } catch (error) {
