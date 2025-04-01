@@ -1734,6 +1734,58 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
    }
 });
 
+app.get('/fileBase/*', async (req, res) => {
+   try {
+      const filePath = req.path; // This will be "/fileBase/JD123/1.jpg"
+      const sftp = await getSftpClient();
+
+      try {
+         const fullPath = path.posix.join(BASE_PATH, filePath.replace('/fileBase/', ''));
+         const exists = await sftp.exists(fullPath);
+
+         if (!exists) {
+            return res.status(404).send('File not found');
+         }
+
+         // Determine content type based on file extension
+         const ext = path.extname(filePath).toLowerCase();
+         const contentTypes = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.mp4': 'video/mp4'
+         };
+
+         // Set appropriate content type
+         res.setHeader('Content-Type', contentTypes[ext] || 'application/octet-stream');
+
+         // Stream the file directly to the response
+         const readStream = await sftp.createReadStream(fullPath);
+         readStream.pipe(res);
+
+         // Handle read stream errors
+         readStream.on('error', (err) => {
+            console.error(`Error streaming file ${fullPath}:`, err);
+            if (!res.headersSent) {
+               res.status(500).send('Error reading file');
+            }
+         });
+
+         // Ensure SFTP client is released after streaming
+         readStream.on('end', () => {
+            releaseSftpClient(sftp);
+         });
+      } catch (error) {
+         releaseSftpClient(sftp);
+         console.error(`Error serving file ${filePath}:`, error);
+         res.status(500).send('Server error');
+      }
+   } catch (err) {
+      console.error('Error getting SFTP client:', err);
+      res.status(500).send('Server error');
+   }
+});
+
 app.delete("/delete-account", async (req, res) => {
    try {
       const { account_id, account_identificator } = req.body;

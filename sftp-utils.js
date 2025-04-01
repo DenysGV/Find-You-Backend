@@ -212,11 +212,9 @@ async function deleteFile(remotePath) {
 }
 
 function getPublicUrl(remotePath) {
-   // Убеждаемся, что путь начинается с / и не содержит BASE_PATH
    const normalizedPath = remotePath.startsWith('/') ? remotePath : `/${remotePath}`;
-   const BASE_URL = process.env.FILE_SERVER_URL || 'https://files.yourdomain.com';
+   const BASE_URL = process.env.FILE_SERVER_URL || 'http://109.205.182.161'; // Use SFTP server IP
 
-   // Удаляем дублирующиеся /fileBase, если они есть в пути
    let publicPath = normalizedPath;
    if (BASE_PATH === '/fileBase' && normalizedPath.startsWith('/fileBase')) {
       publicPath = normalizedPath;
