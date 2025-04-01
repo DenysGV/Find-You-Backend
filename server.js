@@ -375,20 +375,34 @@ app.get('/account', async (req, res) => {
       const userDetailsQuery = await pool.query(`SELECT * FROM users WHERE login = $1`, [user.login]);
       const userDetails = userDetailsQuery.rows[0];
 
-      // 📂 Получаем файлы с SFTP-сервера вместо локальной директории
+      // 📂 Получаем файлы с SFTP-сервера
       const remotePath = user.identificator;
       let files = [];
-      try {
-         // Получаем список файлов из директории пользователя
-         const filesList = await listFiles(remotePath);
 
-         // Фильтруем только изображения и видео
-         files = filesList
-            .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.mp4'))
-            .map(file => getPublicUrl(`/${remotePath}/${file}`));
-      } catch (fileErr) {
-         console.error('Error getting files from SFTP:', fileErr);
-         // Продолжаем выполнение, даже если не удалось получить файлы
+      // Проверяем, что у нас есть идентификатор пользователя
+      if (remotePath) {
+         try {
+            // Проверяем существование директории перед запросом списка файлов
+            const dirExists = await exists(remotePath);
+            if (dirExists) {
+               // Получаем список файлов из директории пользователя
+               const filesList = await listFiles(remotePath);
+
+               // Фильтруем только изображения и видео и формируем URL-адреса
+               files = filesList
+                  .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.mp4'))
+                  .map(file => getPublicUrl(`/${remotePath}/${file}`));
+
+               console.log(`Получено ${files.length} файлов для пользователя ${remotePath}`);
+            } else {
+               console.log(`Директория ${remotePath} не существует на SFTP`);
+            }
+         } catch (fileErr) {
+            console.error(`Ошибка получения файлов с SFTP для ${remotePath}:`, fileErr);
+            // Продолжаем выполнение, даже если не удалось получить файлы
+         }
+      } else {
+         console.log('Отсутствует identificator пользователя');
       }
 
       // Собираем финальный объект
@@ -400,12 +414,12 @@ app.get('/account', async (req, res) => {
          rating: rating,
          comments: commentsTree,
          userDetails: userDetails,
-         files: files  // 📂 Добавляем файлы с SFTP
+         files: files
       };
 
       res.json(fullAccountInfo);
    } catch (err) {
-      console.error('Error:', err);
+      console.error('Error in account endpoint:', err);
       res.status(500).json({ error: 'Server error', message: err.message });
    }
 });
@@ -1537,11 +1551,16 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
 
       // Создаем директорию на SFTP, если она не существует
       try {
+         console.log(`Попытка создания/проверки директории ${id} на SFTP...`);
          await createDirectory(id);
          console.log(`Директория проверена/создана на SFTP: ${id}`);
       } catch (dirError) {
          console.error(`Ошибка при создании директории на SFTP для ${id}:`, dirError);
-         return res.status(500).json({ success: false, message: "Ошибка при работе с SFTP" });
+         return res.status(500).json({
+            success: false,
+            message: "Ошибка при работе с SFTP",
+            error: dirError.message
+         });
       }
 
       // Обрабатываем входящие ссылки
@@ -1550,20 +1569,30 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
          try {
             incomingLinks = JSON.parse(req.body.links);
             incomingLinks = incomingLinks.filter(item => typeof item === "string");
+            console.log(`Получено ${incomingLinks.length} ссылок`);
          } catch (error) {
             console.error("Ошибка парсинга JSON:", error);
          }
       }
 
+      // Проверяем наличие файлов
+      console.log(`Количество загружаемых файлов: ${req.files ? req.files.length : 0}`);
+
       try {
          // Получаем файлы в папке на SFTP
+         console.log(`Получение списка существующих файлов на SFTP в директории ${id}...`);
          let existingFiles = await listFiles(id);
          console.log(`Существующие файлы в директории ${id}:`, existingFiles);
 
          // Получаем все занятые номера
          let usedNumbers = existingFiles
-            .map(file => parseInt(file.split(".")[0]))
-            .filter(num => !isNaN(num));
+            .map(file => {
+               const fileNumber = parseInt(file.split(".")[0]);
+               return isNaN(fileNumber) ? -1 : fileNumber;
+            })
+            .filter(num => num >= 0);
+
+         console.log("Занятые номера файлов:", usedNumbers);
 
          // Функция для поиска первого свободного номера
          const getNextNumber = (usedNumbers, start) => {
@@ -1575,70 +1604,107 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
 
          // Загружаем новые файлы на SFTP
          let uploadedFiles = [];
-         const uploadPromises = req.files.map(async (file) => {
-            try {
-               let ext = path.extname(file.originalname).toLowerCase();
-               let newNumber = /\.(mp4|mov|avi|mkv)$/i.test(ext)
-                  ? getNextNumber(usedNumbers, 200)  // Видео от 200 и выше
-                  : getNextNumber(usedNumbers, 1);   // Картинки от 1 до 199
 
-               let newFileName = `${newNumber}${ext}`;
+         if (req.files && req.files.length > 0) {
+            const uploadPromises = req.files.map(async (file) => {
+               try {
+                  let ext = path.extname(file.originalname).toLowerCase();
+                  let newNumber = /\.(mp4|mov|avi|mkv)$/i.test(ext)
+                     ? getNextNumber(usedNumbers, 200)  // Видео от 200 и выше
+                     : getNextNumber(usedNumbers, 1);   // Картинки от 1 до 199
 
-               // Загружаем файл на SFTP
-               const remotePath = await uploadFile(file.path, id, newFileName);
-               console.log(`Файл загружен на SFTP: ${remotePath}`);
+                  let newFileName = `${newNumber}${ext}`;
+                  console.log(`Загрузка файла ${file.originalname} как ${newFileName}...`);
 
-               // Создаем публичную ссылку на файл
-               const publicUrl = getPublicUrl(remotePath);
-               uploadedFiles.push(publicUrl);
+                  // Загружаем файл на SFTP
+                  const remotePath = await uploadFile(file.path, id, newFileName);
+                  console.log(`Файл успешно загружен на SFTP: ${remotePath}`);
 
-               // Удаляем временный файл
-               fs.unlinkSync(file.path);
+                  // Создаем публичную ссылку на файл
+                  const publicUrl = getPublicUrl(remotePath);
+                  uploadedFiles.push(publicUrl);
 
-               return publicUrl;
-            } catch (uploadError) {
-               console.error(`Ошибка при загрузке файла ${file.originalname}:`, uploadError);
-               // Удаляем временный файл даже при ошибке
-               if (fs.existsSync(file.path)) {
-                  fs.unlinkSync(file.path);
+                  // Удаляем временный файл
+                  if (fs.existsSync(file.path)) {
+                     fs.unlinkSync(file.path);
+                     console.log(`Временный файл ${file.path} удален`);
+                  }
+
+                  return publicUrl;
+               } catch (uploadError) {
+                  console.error(`Ошибка при загрузке файла ${file.originalname}:`, uploadError);
+                  // Удаляем временный файл даже при ошибке
+                  if (fs.existsSync(file.path)) {
+                     fs.unlinkSync(file.path);
+                     console.log(`Временный файл ${file.path} удален после ошибки`);
+                  }
+                  throw uploadError;
                }
-               throw uploadError;
-            }
-         });
+            });
 
-         // Ждем завершения всех загрузок
-         await Promise.all(uploadPromises);
+            // Ждем завершения всех загрузок
+            await Promise.all(uploadPromises);
+            console.log(`Загружено ${uploadedFiles.length} файлов`);
+         } else {
+            console.log("Нет файлов для загрузки");
+         }
 
          // Получаем обновленный список файлов
+         console.log("Получение обновленного списка файлов...");
          existingFiles = await listFiles(id);
 
          // Получаем имена файлов из ссылок
          let incomingFileNames = incomingLinks.map(link => path.basename(link));
          let uploadedFileNames = uploadedFiles.map(link => path.basename(link));
 
+         console.log("Сохраняемые файлы (из ссылок):", incomingFileNames);
+         console.log("Загруженные файлы:", uploadedFileNames);
+
          // Удаляем файлы, которых нет в incomingFileNames и uploadedFileNames
-         const deletePromises = existingFiles.map(async (file) => {
-            if (!incomingFileNames.includes(file) && !uploadedFileNames.includes(file)) {
+         if (incomingFileNames.length > 0 || uploadedFileNames.length > 0) {
+            const filesToDelete = existingFiles.filter(file =>
+               !incomingFileNames.includes(file) && !uploadedFileNames.includes(file));
+
+            console.log("Файлы для удаления:", filesToDelete);
+
+            const deletePromises = filesToDelete.map(async (file) => {
                try {
                   await deleteFile(`${id}/${file}`);
                   console.log(`Файл удален с SFTP: ${id}/${file}`);
                } catch (deleteError) {
                   console.error(`Ошибка при удалении файла ${file}:`, deleteError);
                }
-            }
-         });
+            });
 
-         // Ждем завершения всех удалений
-         await Promise.all(deletePromises);
+            // Ждем завершения всех удалений
+            await Promise.all(deletePromises);
+         } else {
+            console.log("Нет файлов для удаления (сохраняем все существующие)");
+         }
 
          // Получаем финальный список файлов и формируем публичные ссылки
+         console.log("Получение финального списка файлов...");
          const updatedFiles = await listFiles(id);
-         const updatedFileUrls = updatedFiles.map(file => getPublicUrl(`/fileBase/${id}/${file}`));
+         const updatedFileUrls = updatedFiles
+            .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.mp4'))
+            .map(file => getPublicUrl(`/${id}/${file}`));
 
-         res.json({ success: true, message: "Файлы загружены", files: updatedFileUrls });
+         console.log(`Финальный список файлов (${updatedFileUrls.length}):`, updatedFileUrls);
+
+         res.json({
+            success: true,
+            message: "Операция выполнена успешно",
+            files: updatedFileUrls,
+            uploaded: uploadedFiles.length,
+            deleted: existingFiles.length - updatedFiles.length + uploadedFiles.length
+         });
       } catch (sftpError) {
          console.error(`Ошибка при работе с SFTP:`, sftpError);
-         return res.status(500).json({ success: false, message: "Ошибка при работе с SFTP", error: sftpError.message });
+         return res.status(500).json({
+            success: false,
+            message: "Ошибка при работе с SFTP",
+            error: sftpError.message
+         });
       }
    } catch (error) {
       console.error("Общая ошибка:", error);
@@ -1648,11 +1714,16 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
          for (const file of req.files) {
             if (fs.existsSync(file.path)) {
                fs.unlinkSync(file.path);
+               console.log(`Временный файл ${file.path} удален при общей ошибке`);
             }
          }
       }
 
-      res.status(500).json({ success: false, message: "Ошибка на сервере", error: error.message });
+      res.status(500).json({
+         success: false,
+         message: "Ошибка на сервере",
+         error: error.message
+      });
    }
 });
 
