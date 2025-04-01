@@ -21,7 +21,8 @@ import {
    listFiles,
    uploadFile,
    deleteFile,
-   getPublicUrl
+   getPublicUrl,
+   deleteRemoteDirectory
 } from './sftp-utils.js';
 
 dotenv.config();
@@ -1805,51 +1806,6 @@ app.delete("/delete-accounts", async (req, res) => {
 
       // Удаляем записи из базы данных
       const { rowCount } = await pool.query(`DELETE FROM accounts WHERE id = ANY($1);`, [account_ids]);
-
-      // Создаем функцию для удаления директории на SFTP сервере
-      async function deleteRemoteDirectory(remotePath) {
-         const sftp = await getSftpClient();
-         try {
-            const fullPath = path.posix.join(BASE_PATH, remotePath);
-            console.log(`[SFTP delete] Удаление директории на SFTP: ${fullPath}`);
-
-            // Проверяем существование директории
-            const exists = await sftp.exists(fullPath);
-            if (!exists) {
-               console.log(`[SFTP delete] Директория не существует: ${fullPath}`);
-               return;
-            }
-
-            // Получаем список файлов в директории
-            const list = await sftp.list(fullPath);
-
-            // Удаляем все файлы и вложенные директории
-            for (const item of list) {
-               const itemPath = path.posix.join(fullPath, item.name);
-
-               if (item.type === '-') {
-                  // Если это файл
-                  await sftp.delete(itemPath);
-                  console.log(`[SFTP delete] Удален файл: ${itemPath}`);
-               } else if (item.type === 'd') {
-                  // Если это директория и это не "." или ".."
-                  if (item.name !== '.' && item.name !== '..') {
-                     // Рекурсивно удаляем вложенную директорию
-                     await deleteRemoteDirectory(path.posix.join(remotePath, item.name));
-                  }
-               }
-            }
-
-            // Удаляем саму директорию после очистки содержимого
-            await sftp.rmdir(fullPath);
-            console.log(`[SFTP delete] Директория успешно удалена: ${fullPath}`);
-         } catch (error) {
-            console.error(`[SFTP error] Ошибка удаления директории ${remotePath}: ${error.message}`);
-            throw error;
-         } finally {
-            releaseSftpClient(sftp);
-         }
-      }
 
       // Удаляем папки с файлами как на локальном сервере, так и на SFTP
       const deletionPromises = account_identificators.map(async (identificator) => {
