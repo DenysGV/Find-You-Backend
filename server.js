@@ -15,7 +15,14 @@ import multer from 'multer';
 import { TextDecoder } from 'util';
 import iconv from 'iconv-lite'
 import xss from 'xss';
-import { createDirectory, listFiles, uploadFile, deleteFile, getPublicUrl } from './sftp-utils.js';
+import {
+   createDirectory,
+   exists,
+   listFiles,
+   uploadFile,
+   deleteFile,
+   getPublicUrl
+} from './sftp-utils.js';
 
 dotenv.config();
 
