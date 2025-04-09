@@ -56,7 +56,7 @@ export default pool;
 
 app.use(cors());
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'fileBase')));
 app.use((req, res, next) => {
    // Рекурсивно очищаем все поля в запросах
@@ -189,6 +189,7 @@ function parseTxtFile(filePath) {
             tw: getAllValues('tw'),
             girl: getFirstValue('girl'),
             boy: getFirstValue('boy'),
+            vk: getFirstValue('vk'),
             email: getAllValues('email'),
             tg: getAllValues('tg'),
             tik: getAllValues('tik'),
@@ -443,7 +444,7 @@ app.get('/cities', authMiddleware, async (req, res) => {
             COUNT(a.id) AS Account_Count
          FROM accounts a
          JOIN city c ON a."City_id" = c.id
-         WHERE (a.date_of_create IS NULL OR a.date_of_create <= $1)
+         WHERE (a.date_of_create IS NOT NULL OR a.date_of_create <= $1)
          GROUP BY c.id, c.name_ru
          ORDER BY Account_Count DESC;
       `, [currentDate]);
@@ -467,7 +468,7 @@ app.get('/tags', async (req, res) => {
          FROM tags t
          LEFT JOIN tags_detail td ON t.id = td.tag_id
          LEFT JOIN accounts a ON td.account_id = a.id
-         WHERE (a.date_of_create IS NULL OR a.date_of_create <= $1 OR a.id IS NULL)
+         WHERE (a.date_of_create IS NOT NULL OR a.date_of_create <= $1 OR a.id IS NULL)
          GROUP BY t.id, t.name_ru
          ORDER BY usage_count DESC;
       `, [currentDate]);
@@ -1054,32 +1055,54 @@ app.get('/get-orders', async (req, res) => {
 
 app.get('/get-admin-orders', async (req, res) => {
    try {
-      const { user_id, start_date, end_date } = req.query;
-      let query = `
-         SELECT o.* 
+      const { user_id, start_date, end_date, page = 1 } = req.query;
+      const limit = 20;
+      const offset = (Number(page) - 1) * limit;
+
+      let baseQuery = `
          FROM orders o
          LEFT JOIN orders_deleted od ON o.id = od.order_id AND od.user_id = $1
+         LEFT JOIN users u ON o.user_id = u.id
          WHERE od.order_id IS NULL
       `;
-      let queryParams = [user_id];
-      let conditions = [];
 
-      // Фильтрация по дате, если указаны start_date и end_date
+
+      let conditions = [];
+      let queryParams = [user_id];
+
+      // Фильтрация по дате
       if (start_date && end_date) {
          conditions.push(`o.created_at BETWEEN $${queryParams.length + 1} AND $${queryParams.length + 2}`);
          queryParams.push(start_date, end_date);
       }
 
-      // Если есть дополнительные условия, добавляем их в запрос
+      // Добавляем условия к базовому запросу
       if (conditions.length > 0) {
-         query += ` AND ` + conditions.join(' AND ');
+         baseQuery += ` AND ` + conditions.join(' AND ');
       }
 
-      query += ` ORDER BY o.created_at DESC;`;
+      // Получаем общее количество заказов
+      const countQuery = `SELECT COUNT(*) ${baseQuery}`;
+      const countResult = await pool.query(countQuery, queryParams);
+      const total = Number(countResult.rows[0].count);
+      const totalPages = Math.ceil(total / limit);
 
-      // Выполнение запроса
-      const { rows } = await pool.query(query, queryParams);
-      res.json(rows);
+      // Получаем заказы с лимитом
+      const dataQuery = `
+         SELECT o.*, u.login 
+         ${baseQuery} 
+         ORDER BY o.created_at DESC 
+         LIMIT ${limit} OFFSET ${offset}
+      `;
+
+      const ordersResult = await pool.query(dataQuery, queryParams);
+
+      res.json({
+         data: ordersResult.rows,
+         currentPage: Number(page),
+         totalPages,
+      });
+
    } catch (err) {
       console.error('Ошибка:', err);
       res.status(500).json({ error: 'Ошибка сервера', message: err.message });
