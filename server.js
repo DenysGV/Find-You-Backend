@@ -630,7 +630,11 @@ app.get("/get-role", async (req, res) => {
       const result = await pool.query("select * from roles where user_id = $1", [user_id])
 
       if (result.rows.length == 0) {
-         return res.status(404).json({ error: 'У пользователя нет прав' });
+         return res.status(201).json({
+            id: new Date(),
+            name: 'user',
+            user_id,
+         });
       }
 
       res.status(201).json(result.rows[0]);
