@@ -1056,6 +1056,13 @@ app.get('/get-orders', async (req, res) => {
 app.get('/get-admin-orders', async (req, res) => {
    try {
       const { user_id, start_date, end_date, page = 1 } = req.query;
+
+      // Преобразуем даты в формат YYYY-MM-DD
+      const formatDate = (date) => {
+         const [day, month, year] = date.split('.');
+         return `${year}-${month}-${day}`;
+      };
+
       const limit = 20;
       const offset = (Number(page) - 1) * limit;
 
@@ -1066,14 +1073,15 @@ app.get('/get-admin-orders', async (req, res) => {
          WHERE od.order_id IS NULL
       `;
 
-
       let conditions = [];
       let queryParams = [user_id];
 
       // Фильтрация по дате
       if (start_date && end_date) {
          conditions.push(`o.created_at BETWEEN $${queryParams.length + 1} AND $${queryParams.length + 2}`);
-         queryParams.push(start_date, end_date);
+
+         // Преобразуем start_date и end_date
+         queryParams.push(formatDate(start_date), formatDate(end_date));
       }
 
       // Добавляем условия к базовому запросу
