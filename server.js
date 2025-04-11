@@ -135,8 +135,8 @@ function parseTxtFile(filePath) {
       }
 
       const readyAccounts = [];
-      // Улучшенное регулярное выражение для извлечения блоков аккаунтов, в том числе тега date
-      const accountBlockPattern = /<title>(.*?)<\/title>[\s\S]*?<id>(.*?)<\/id>[\s\S]*?(?:<date>(.*?)<\/date>)?/g;
+      // Изменяем регулярное выражение для извлечения блоков аккаунтов
+      const accountBlockPattern = /<title>(.*?)<\/title>[\s\S]*?<id>(.*?)<\/id>[\s\S]*?(?:<date>(.*?)<\/date>|<\/tags>)/g;
 
       let blockMatch;
       while ((blockMatch = accountBlockPattern.exec(fileContent)) !== null) {
@@ -149,17 +149,11 @@ function parseTxtFile(filePath) {
          // Проверка идентификатора
          if (!id) continue;
 
-         // Улучшенная обработка даты
-         let date_of_create = null;
-         if (dateValue && dateValue.trim() !== '') {
-            // Преобразуем дату в формат ISO
-            const dateParts = dateValue.trim().split(/[./-]/);
-            if (dateParts.length === 3) {
-               // Преобразуем в YYYY-MM-DD
-               date_of_create = `${dateParts[0]}-${dateParts[1].padStart(2, '0')}-${dateParts[2].padStart(2, '0')}`;
-            } else {
-               date_of_create = dateValue.trim();
-            }
+         let date_of_create;
+         if (!dateValue || dateValue.trim() === '') {
+            date_of_create = null;
+         } else {
+            date_of_create = dateValue.trim();
          }
 
          // Функция для извлечения всех значений для определенного тега
@@ -1440,14 +1434,65 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
          let dateToInsert;
          if (account.date_of_create === null) {
             dateToInsert = null;
-         } else if (account.date_of_create) {
-            // Убедимся, что дата в правильном формате
+            console.log(`Дата для аккаунта ${identificator} установлена в NULL`);
+         } else if (account.date_of_create && account.date_of_create.trim() !== '') {
+            // Преобразуем формат даты для корректного парсинга
+            const dateStr = account.date_of_create.replace(/\./g, '-').replace(/\//g, '-');
+
             try {
-               dateToInsert = new Date(account.date_of_create).toISOString().split('T')[0];
+               // Проверяем формат даты и преобразуем в YYYY-MM-DD
+               let dateParts;
+               if (dateStr.includes('-')) {
+                  dateParts = dateStr.split('-');
+               } else if (dateStr.includes('.')) {
+                  dateParts = dateStr.split('.');
+               } else {
+                  // Другие возможные разделители
+                  dateParts = dateStr.match(/(\d{4})(\d{2})(\d{2})/) || dateStr.match(/(\d{2})(\d{2})(\d{4})/);
+               }
+
+               let year, month, day;
+               if (dateParts) {
+                  if (dateParts.length === 3) {
+                     // Обработка формата YYYY-MM-DD или DD-MM-YYYY
+                     if (dateParts[0].length === 4) {
+                        // YYYY-MM-DD
+                        [year, month, day] = dateParts;
+                     } else {
+                        // DD-MM-YYYY
+                        [day, month, year] = dateParts;
+                     }
+                  } else if (dateParts.length === 4) {
+                     // Формат из регулярного выражения
+                     [, year, month, day] = dateParts;
+                  }
+
+                  // Убедимся, что значения являются числами
+                  year = parseInt(year, 10);
+                  month = parseInt(month, 10);
+                  day = parseInt(day, 10);
+
+                  // Проверка валидности даты
+                  if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                     // Форматируем дату в YYYY-MM-DD для SQL
+                     dateToInsert = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+                  } else {
+                     dateToInsert = null;
+                  }
+               } else {
+                  // Пытаемся использовать стандартный парсер JavaScript
+                  const date = new Date(dateStr);
+                  if (!isNaN(date.getTime())) {
+                     dateToInsert = date.toISOString().split('T')[0];
+                  } else {
+                     dateToInsert = null;
+                  }
+               }
             } catch (e) {
                dateToInsert = null;
             }
          } else {
+            // Если дата не указана, используем текущую дату
             dateToInsert = new Date().toISOString().split('T')[0];
          }
 
@@ -1520,9 +1565,7 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
          // === Создание папки для аккаунта на SFTP сервере ===
          try {
             await createDirectory(identificator);
-            console.log(`Создана директория на SFTP: ${identificator}`);
          } catch (sftpError) {
-            console.error(`Ошибка создания директории на SFTP для ${identificator}:`, sftpError);
             // Продолжаем выполнение, не прерывая процесс из-за ошибки с SFTP
          }
 
@@ -1533,6 +1576,7 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
             icq: "icq",
             insta: "insta",
             tw: "tw",
+            vk: "vk",
             email: "email",
             tg: "tg",
             tik: "tik",
