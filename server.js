@@ -135,8 +135,8 @@ function parseTxtFile(filePath) {
       }
 
       const readyAccounts = [];
-      // Изменяем регулярное выражение для извлечения блоков аккаунтов
-      const accountBlockPattern = /<title>(.*?)<\/title>[\s\S]*?<id>(.*?)<\/id>[\s\S]*?(?:<date>(.*?)<\/date>|<\/tags>)/g;
+      // Улучшенное регулярное выражение для извлечения блоков аккаунтов, в том числе тега date
+      const accountBlockPattern = /<title>(.*?)<\/title>[\s\S]*?<id>(.*?)<\/id>[\s\S]*?(?:<date>(.*?)<\/date>)?/g;
 
       let blockMatch;
       while ((blockMatch = accountBlockPattern.exec(fileContent)) !== null) {
@@ -149,11 +149,17 @@ function parseTxtFile(filePath) {
          // Проверка идентификатора
          if (!id) continue;
 
-         let date_of_create;
-         if (dateValue.trim() === '') {
-            date_of_create = null;
-         } else {
-            date_of_create = dateValue.trim();
+         // Улучшенная обработка даты
+         let date_of_create = null;
+         if (dateValue && dateValue.trim() !== '') {
+            // Преобразуем дату в формат ISO
+            const dateParts = dateValue.trim().split(/[./-]/);
+            if (dateParts.length === 3) {
+               // Преобразуем в YYYY-MM-DD
+               date_of_create = `${dateParts[0]}-${dateParts[1].padStart(2, '0')}-${dateParts[2].padStart(2, '0')}`;
+            } else {
+               date_of_create = dateValue.trim();
+            }
          }
 
          // Функция для извлечения всех значений для определенного тега
@@ -1388,8 +1394,6 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
 
       const accounts = await parseTxtFile(req.file.path);
 
-      console.log(accounts);
-
       fs.unlinkSync(req.file.path); // Удаляем временный файл
 
       if (!Array.isArray(accounts)) {
@@ -1432,6 +1436,21 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
             [identificator]
          );
 
+         // Обработка даты создания для вставки в БД
+         let dateToInsert;
+         if (account.date_of_create === null) {
+            dateToInsert = null;
+         } else if (account.date_of_create) {
+            // Убедимся, что дата в правильном формате
+            try {
+               dateToInsert = new Date(account.date_of_create).toISOString().split('T')[0];
+            } catch (e) {
+               dateToInsert = null;
+            }
+         } else {
+            dateToInsert = new Date().toISOString().split('T')[0];
+         }
+
          let accountId;
          if (existingAccount.rows.length > 0) {
             // Обновляем существующий аккаунт
@@ -1441,7 +1460,7 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
                   account.title,
                   account.nvideo === "1" ? 1 : 0,
                   cityId,
-                  account.date_of_create == null ? null : account.date_of_create ? account.date_of_create : new Date().toISOString(),
+                  dateToInsert,
                   dateOfBirth,
                   identificator
                ]
@@ -1456,7 +1475,7 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
                   identificator,
                   account.nvideo === "1" ? 1 : 0,
                   cityId,
-                  account.date_of_create == null ? null : account.date_of_create ? account.date_of_create : new Date().toISOString(),
+                  dateToInsert,
                   dateOfBirth
                ]
             );
