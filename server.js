@@ -135,16 +135,23 @@ function parseTxtFile(filePath) {
       }
 
       const readyAccounts = [];
-      // Изменяем регулярное выражение для извлечения блоков аккаунтов
-      const accountBlockPattern = /<title>(.*?)<\/title>[\s\S]*?<id>(.*?)<\/id>[\s\S]*?(?:<date>(.*?)<\/date>|<\/tags>)/g;
 
-      let blockMatch;
-      while ((blockMatch = accountBlockPattern.exec(fileContent)) !== null) {
-         // Извлекаем блок текста, содержащий весь аккаунт
-         const accountBlock = blockMatch[0];
-         const title = blockMatch[1];
-         const id = blockMatch[2];
-         const dateValue = blockMatch[3] || '';
+      // Разделяем контент файла на блоки аккаунтов (каждый начинается с тега <title>)
+      const accountBlocks = fileContent.split(/<title>/).filter(block => block.trim() !== '');
+
+      for (let block of accountBlocks) {
+         block = '<title>' + block; // Восстанавливаем тег <title> который был удален при сплите
+
+         // Извлекаем основные данные
+         const titleMatch = /<title>(.*?)<\/title>/.exec(block);
+         const idMatch = /<id>(.*?)<\/id>/.exec(block);
+         const dateMatch = /<date>(.*?)<\/date>/.exec(block);
+
+         if (!titleMatch || !idMatch) continue; // Пропускаем блок если нет основных данных
+
+         const title = titleMatch[1];
+         const id = idMatch[1];
+         const dateValue = dateMatch ? dateMatch[1] : '';
 
          // Проверка идентификатора
          if (!id) continue;
@@ -161,7 +168,7 @@ function parseTxtFile(filePath) {
             const pattern = new RegExp(`<${tag}>(.*?)<\/${tag}>`, 'g');
             const values = [];
             let match;
-            while ((match = pattern.exec(accountBlock)) !== null) {
+            while ((match = pattern.exec(block)) !== null) {
                if (match[1].trim() !== '') {
                   values.push(match[1].trim());
                }
@@ -1434,59 +1441,28 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
          let dateToInsert;
          if (account.date_of_create === null) {
             dateToInsert = null;
-            console.log(`Дата для аккаунта ${identificator} установлена в NULL`);
          } else if (account.date_of_create && account.date_of_create.trim() !== '') {
-            // Преобразуем формат даты для корректного парсинга
-            const dateStr = account.date_of_create.replace(/\./g, '-').replace(/\//g, '-');
+            // Преобразуем формат YYYY.MM.DD в YYYY-MM-DD для SQL
+            const dateStr = account.date_of_create.replace(/\./g, '-');
+
 
             try {
-               // Проверяем формат даты и преобразуем в YYYY-MM-DD
-               let dateParts;
-               if (dateStr.includes('-')) {
-                  dateParts = dateStr.split('-');
-               } else if (dateStr.includes('.')) {
-                  dateParts = dateStr.split('.');
-               } else {
-                  // Другие возможные разделители
-                  dateParts = dateStr.match(/(\d{4})(\d{2})(\d{2})/) || dateStr.match(/(\d{2})(\d{2})(\d{4})/);
-               }
+               // Для формата YYYY.MM.DD или YYYY-MM-DD
+               const dateParts = dateStr.split(/[-\.]/);
 
-               let year, month, day;
-               if (dateParts) {
-                  if (dateParts.length === 3) {
-                     // Обработка формата YYYY-MM-DD или DD-MM-YYYY
-                     if (dateParts[0].length === 4) {
-                        // YYYY-MM-DD
-                        [year, month, day] = dateParts;
-                     } else {
-                        // DD-MM-YYYY
-                        [day, month, year] = dateParts;
-                     }
-                  } else if (dateParts.length === 4) {
-                     // Формат из регулярного выражения
-                     [, year, month, day] = dateParts;
-                  }
+               if (dateParts.length === 3) {
+                  // Предполагаем формат YYYY.MM.DD
+                  const [year, month, day] = dateParts;
 
-                  // Убедимся, что значения являются числами
-                  year = parseInt(year, 10);
-                  month = parseInt(month, 10);
-                  day = parseInt(day, 10);
-
-                  // Проверка валидности даты
-                  if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-                     // Форматируем дату в YYYY-MM-DD для SQL
-                     dateToInsert = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+                  // Проверяем, что все части являются числами и имеют правильную длину
+                  if (/^\d{4}$/.test(year) && /^\d{1,2}$/.test(month) && /^\d{1,2}$/.test(day)) {
+                     // Форматируем в YYYY-MM-DD
+                     dateToInsert = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
                   } else {
                      dateToInsert = null;
                   }
                } else {
-                  // Пытаемся использовать стандартный парсер JavaScript
-                  const date = new Date(dateStr);
-                  if (!isNaN(date.getTime())) {
-                     dateToInsert = date.toISOString().split('T')[0];
-                  } else {
-                     dateToInsert = null;
-                  }
+                  dateToInsert = null;
                }
             } catch (e) {
                dateToInsert = null;
@@ -1496,11 +1472,45 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
             dateToInsert = new Date().toISOString().split('T')[0];
          }
 
+         // Если мы дошли до этого места и dateToInsert === null, но дата была в файле,
+         // попробуем еще один вариант преобразования
+         if (dateToInsert === null && account.date_of_create && account.date_of_create.trim() !== '') {
+            try {
+               // Попробуем просто создать дату из строки
+               const dateParts = account.date_of_create.split('.');
+               if (dateParts.length === 3) {
+                  const [year, month, day] = dateParts;
+                  const numYear = parseInt(year, 10);
+                  const numMonth = parseInt(month, 10);
+                  const numDay = parseInt(day, 10);
+
+                  // Простая валидация
+                  if (numYear >= 1900 && numYear <= 2100 &&
+                     numMonth >= 1 && numMonth <= 12 &&
+                     numDay >= 1 && numDay <= 31) {
+                     dateToInsert = `${numYear}-${numMonth.toString().padStart(2, '0')}-${numDay.toString().padStart(2, '0')}`;
+                  }
+               }
+            } catch (e) {
+            }
+         }
+
+
          let accountId;
          if (existingAccount.rows.length > 0) {
             // Обновляем существующий аккаунт
+            const updateQuery = `
+               UPDATE accounts 
+               SET name = $1, 
+                   check_video = $2, 
+                   "City_id" = $3, 
+                   date_of_create = $4, 
+                   date_of_birth = $5 
+               WHERE identificator = $6 
+               RETURNING id, date_of_create`;
+
             const updateResult = await pool.query(
-               "UPDATE accounts SET name = $1, check_video = $2, \"City_id\" = $3, date_of_create = $4, date_of_birth = $5 WHERE identificator = $6 RETURNING id",
+               updateQuery,
                [
                   account.title,
                   account.nvideo === "1" ? 1 : 0,
@@ -1510,11 +1520,18 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
                   identificator
                ]
             );
+
             accountId = updateResult.rows[0].id;
          } else {
             // Создаем новый аккаунт
+            const insertQuery = `
+               INSERT INTO accounts 
+               (name, identificator, check_video, "City_id", date_of_create, date_of_birth) 
+               VALUES ($1, $2, $3, $4, $5, $6) 
+               RETURNING id, date_of_create`;
+
             const accountResult = await pool.query(
-               "INSERT INTO accounts (name, identificator, check_video, \"City_id\", date_of_create, date_of_birth) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+               insertQuery,
                [
                   account.title,
                   identificator,
@@ -1524,8 +1541,18 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
                   dateOfBirth
                ]
             );
+
             accountId = accountResult.rows[0].id;
          }
+
+         // Проверка, что дата действительно сохранилась
+         const checkResult = await pool.query(
+            "SELECT date_of_create FROM accounts WHERE id = $1",
+            [accountId]
+         );
+
+         console.log(`Проверка сохранения даты для аккаунта ${identificator}:`,
+            checkResult.rows[0].date_of_create);
 
          // === Добавление тегов ===
          let tags = account.tags || "";
@@ -1565,7 +1592,9 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
          // === Создание папки для аккаунта на SFTP сервере ===
          try {
             await createDirectory(identificator);
+            console.log(`Создана директория на SFTP: ${identificator}`);
          } catch (sftpError) {
+            console.error(`Ошибка создания директории на SFTP для ${identificator}:`, sftpError);
             // Продолжаем выполнение, не прерывая процесс из-за ошибки с SFTP
          }
 
@@ -1576,7 +1605,6 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
             icq: "icq",
             insta: "insta",
             tw: "tw",
-            vk: "vk",
             email: "email",
             tg: "tg",
             tik: "tik",
