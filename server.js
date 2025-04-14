@@ -1067,13 +1067,6 @@ app.get('/get-orders', async (req, res) => {
 app.get('/get-admin-orders', async (req, res) => {
    try {
       const { user_id, start_date, end_date, page = 1 } = req.query;
-
-      // Преобразуем даты в формат YYYY-MM-DD
-      const formatDate = (date) => {
-         const [day, month, year] = date.split('.');
-         return `${year}-${month}-${day}`;
-      };
-
       const limit = 20;
       const offset = (Number(page) - 1) * limit;
 
@@ -1087,12 +1080,10 @@ app.get('/get-admin-orders', async (req, res) => {
       let conditions = [];
       let queryParams = [user_id];
 
-      // Фильтрация по дате
+      // Фильтрация по дате (исправлено)
       if (start_date && end_date) {
-         conditions.push(`o.created_at BETWEEN $${queryParams.length + 1} AND $${queryParams.length + 2}`);
-
-         // Преобразуем start_date и end_date
-         queryParams.push(formatDate(start_date), formatDate(end_date));
+         conditions.push(`o.created_at::DATE BETWEEN $${queryParams.length + 1}::DATE AND $${queryParams.length + 2}::DATE`);
+         queryParams.push(start_date, end_date);
       }
 
       // Добавляем условия к базовому запросу
@@ -1108,9 +1099,9 @@ app.get('/get-admin-orders', async (req, res) => {
 
       // Получаем заказы с лимитом
       const dataQuery = `
-         SELECT o.*, u.login 
-         ${baseQuery} 
-         ORDER BY o.created_at DESC 
+         SELECT o.*, u.login
+         ${baseQuery}
+         ORDER BY o.created_at DESC
          LIMIT ${limit} OFFSET ${offset}
       `;
 
@@ -1121,7 +1112,6 @@ app.get('/get-admin-orders', async (req, res) => {
          currentPage: Number(page),
          totalPages,
       });
-
    } catch (err) {
       console.error('Ошибка:', err);
       res.status(500).json({ error: 'Ошибка сервера', message: err.message });
