@@ -1443,32 +1443,25 @@ app.delete('/users-delete', async (req, res) => {
 app.post('/change-user-avatar', uploadPhoto.single("photo"), async (req, res) => {
    try {
       const { id } = req.body;
-
       if (!req.file) {
          return res.status(400).json({ error: 'Файл не загружен' });
       }
-
       const photoBuffer = req.file.buffer; // Получаем бинарные данные фото
-
-      // Обновляем поле 'avatar' в базе данных
+      // Обновляем поле 'avatar' в базе данных без запроса поля 'role'
       const result = await pool.query(
          `UPDATE users
           SET avatar = $1
           WHERE id = $2
-          RETURNING id, login, mail, role, date_of_create`, // Возвращаем только основные поля без аватара
+          RETURNING id, login, mail, date_of_create`, // Убрано поле 'role'
          [photoBuffer, id]
       );
-
       if (result.rows.length === 0) {
          return res.status(404).json({ error: 'Пользователь не найден' });
       }
-
       // Получаем обновленные данные пользователя
       const user = result.rows[0];
-
       // Добавляем признак наличия аватара, но не передаем его бинарные данные
       user.avatar = { type: 'image', data: [] }; // Пустой массив как индикатор наличия аватара
-
       res.json(user);
    } catch (error) {
       console.error("Server error:", error);
