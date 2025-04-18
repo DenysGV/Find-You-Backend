@@ -340,6 +340,99 @@ app.get('/accounts', async (req, res) => {
    }
 });
 
+app.get('/top-accounts', async (req, res) => {
+   try {
+      const limit = 10; // Получаем топ-10 аккаунтов
+
+      let queryBase = `
+         FROM accounts a
+         LEFT JOIN (
+            SELECT 
+               account_id, 
+               AVG(rate) as average_rating,
+               COUNT(id) as rating_count
+            FROM rating
+            GROUP BY account_id
+         ) r ON a.id = r.account_id
+         LEFT JOIN city c ON a."City_id" = c.id
+      `;
+
+      // Получаем топ аккаунтов
+      let query = `
+         SELECT 
+            a.id, 
+            a.name, 
+            a."City_id", 
+            a.date_of_create, 
+            a.date_of_birth, 
+            a.identificator, 
+            a.photo, 
+            a.check_video,
+            COALESCE(r.average_rating, 0) as average_rating,
+            COALESCE(r.rating_count, 0) as rating_count,
+            /* Формула для расчета рейтинга с учетом количества оценок */
+            COALESCE(
+               (r.average_rating * r.rating_count + 3) / (r.rating_count + 1),
+               0
+            ) as weighted_rating
+         ${queryBase} 
+         ORDER BY weighted_rating DESC, rating_count DESC, average_rating DESC
+         LIMIT $1
+      `;
+
+      const result = await pool.query(query, [limit]);
+      let accounts = result.rows;
+
+      // Проверяем фото (код такой же, как в исходном запросе)
+      for (let account of accounts) {
+         if (!account.photo) {
+            const userDir = path.join(__dirname, 'fileBase', account.identificator);
+            try {
+               if (fs.existsSync(userDir)) {
+                  const files = fs.readdirSync(userDir).filter(file => /\.(jpg|jpeg|png|gif)$/i.test(file));
+                  account.photo = files.length > 0 ? `/uploads/${account.identificator}/${files[0]}` : null;
+               } else {
+                  account.photo = null;
+               }
+            } catch (err) {
+               console.error(`Ошибка при проверке фото для аккаунта ${account.identificator}:`, err);
+               account.photo = null;
+            }
+         }
+      }
+
+      res.json({
+         accounts
+      });
+
+   } catch (err) {
+      console.error('Error:', err);
+      res.status(500).json({ error: 'Server error', message: err.message });
+   }
+});
+
+app.get('/get-all-account-dates', async (req, res) => {
+   try {
+      // Запрос только для получения всех дат создания аккаунтов
+      const query = `
+       SELECT DISTINCT to_char(date_of_create, 'YYYY-MM-DD') as account_date
+       FROM accounts
+       WHERE date_of_create IS NOT NULL
+       ORDER BY account_date
+     `;
+
+      const result = await pool.query(query);
+
+      // Извлекаем даты из результата запроса
+      const dates = result.rows.map(row => row.account_date);
+
+      res.json({ dates });
+   } catch (err) {
+      console.error('Ошибка при получении дат аккаунтов:', err);
+      res.status(500).json({ error: 'Ошибка сервера', message: err.message });
+   }
+});
+
 app.get('/account', async (req, res) => {
    try {
       const { id } = req.query;
@@ -1118,6 +1211,31 @@ app.get('/get-admin-orders', async (req, res) => {
    }
 });
 
+app.get('/get-all-order-dates', async (req, res) => {
+   try {
+      const { user_id } = req.query;
+
+      // Запрос только для дат заказов без фильтрации по дате и без пагинации
+      const query = `
+       SELECT DISTINCT to_char(o.created_at, 'YYYY-MM-DD') as order_date
+       FROM orders o
+       LEFT JOIN orders_deleted od ON o.id = od.order_id AND od.user_id = $1
+       WHERE od.order_id IS NULL
+       ORDER BY order_date
+     `;
+
+      const result = await pool.query(query, [user_id]);
+
+      // Извлекаем даты из результата запроса
+      const dates = result.rows.map(row => row.order_date);
+
+      res.json({ dates });
+   } catch (err) {
+      console.error('Ошибка при получении дат заказов:', err);
+      res.status(500).json({ error: 'Ошибка сервера', message: err.message });
+   }
+});
+
 app.put("/update-orders", async (req, res) => {
    try {
       const { id, status } = req.body;
@@ -1325,22 +1443,89 @@ app.delete('/users-delete', async (req, res) => {
 app.post('/change-user-avatar', uploadPhoto.single("photo"), async (req, res) => {
    try {
       const { id } = req.body;
+
+      if (!req.file) {
+         return res.status(400).json({ error: 'Файл не загружен' });
+      }
+
       const photoBuffer = req.file.buffer; // Получаем бинарные данные фото
 
-      // Обновляем поле 'photo' в базе данных
+      // Обновляем поле 'avatar' в базе данных
       const result = await pool.query(
          `UPDATE users
-            SET avatar = $1
-            WHERE id = $2 
-            RETURNING *`, // Возвращаем все данные пользователя
+          SET avatar = $1
+          WHERE id = $2
+          RETURNING id, login, mail, role, date_of_create`, // Возвращаем только основные поля без аватара
          [photoBuffer, id]
       );
 
-      res.json(result.rows[0]);
+      if (result.rows.length === 0) {
+         return res.status(404).json({ error: 'Пользователь не найден' });
+      }
+
+      // Получаем обновленные данные пользователя
+      const user = result.rows[0];
+
+      // Добавляем признак наличия аватара, но не передаем его бинарные данные
+      user.avatar = { type: 'image', data: [] }; // Пустой массив как индикатор наличия аватара
+
+      res.json(user);
    } catch (error) {
+      console.error("Server error:", error);
       res.status(500).json({ error: 'Ошибка сервера', message: error.message });
    }
-})
+});
+
+app.post('/reset-session', async (req, res) => {
+   try {
+      const { user_id } = req.body;
+
+      if (!user_id) {
+         return res.status(400).json({ error: "user_id обязателен" });
+      }
+
+      // Генерируем новый session_id
+      const newSessionId = uuidv4();
+
+      // Обновляем session_id в базе данных
+      const query = `UPDATE users SET session_id = $1 WHERE id = $2 RETURNING id`;
+      const { rows } = await pool.query(query, [newSessionId, user_id]);
+
+      if (rows.length === 0) {
+         return res.status(404).json({ error: "Пользователь не найден" });
+      }
+
+      res.json({
+         message: "Сессия пользователя успешно сброшена",
+         user_id: rows[0].id
+      });
+   } catch (err) {
+      console.error("Ошибка:", err);
+      res.status(500).json({ error: "Ошибка сервера", message: err.message });
+   }
+});
+
+app.get('/user-avatar/:id', async (req, res) => {
+   try {
+      const { id } = req.params;
+
+      const result = await pool.query(
+         `SELECT avatar FROM users WHERE id = $1`,
+         [id]
+      );
+
+      if (result.rows.length === 0 || !result.rows[0].avatar) {
+         return res.status(404).send('Avatar not found');
+      }
+
+      // Устанавливаем правильный Content-Type для изображения
+      res.set('Content-Type', 'image/jpeg');
+      res.send(result.rows[0].avatar);
+   } catch (error) {
+      console.error("Error fetching avatar:", error);
+      res.status(500).send('Server error');
+   }
+});
 
 app.post("/add-role", async (req, res) => {
    try {
