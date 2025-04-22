@@ -1326,10 +1326,11 @@ app.post("/send-messages", async (req, res) => {
       }
       const user_to_id = userToResult.rows[0].id;
 
-      // Создаем текущее время в UTC
+      // Создаем текущее время с сохранением ISO формата для сохранения информации о временной зоне
       const now = new Date();
-      const date_messages = now.toISOString().split("T")[0]; // YYYY-MM-DD
-      const time_messages = now.toTimeString().split(" ")[0]; // HH:MM:SS
+      const isoString = now.toISOString(); // '2025-04-22T18:33:00.000Z'
+      const date_messages = isoString.split('T')[0]; // YYYY-MM-DD
+      const time_messages = isoString.split('T')[1].split('.')[0]; // HH:MM:SS
 
       const result = await pool.query(
          `INSERT INTO messages (date_messages, time_messages, text_messages, user_from_id, user_to_id)
@@ -1337,7 +1338,14 @@ app.post("/send-messages", async (req, res) => {
          [date_messages, time_messages, text_messages, user_from_id, user_to_id]
       );
 
-      res.status(201).json(result.rows[0]);
+      res.status(201).json({
+         ...result.rows[0],
+         // Добавляем информацию о временной зоне для фронтенда
+         date_info: {
+            iso: isoString,
+            timezone: now.getTimezoneOffset()
+         }
+      });
    } catch (err) {
       console.error("Ошибка:", err);
       res.status(500).json({ error: "Ошибка сервера", message: err.message });
