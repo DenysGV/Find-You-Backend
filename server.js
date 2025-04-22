@@ -1326,26 +1326,18 @@ app.post("/send-messages", async (req, res) => {
       }
       const user_to_id = userToResult.rows[0].id;
 
-      // Создаем текущее время с сохранением ISO формата для сохранения информации о временной зоне
+      // Создаем текущее время в UTC с использованием ISO строки 
       const now = new Date();
-      const isoString = now.toISOString(); // '2025-04-22T18:33:00.000Z'
-      const date_messages = isoString.split('T')[0]; // YYYY-MM-DD
-      const time_messages = isoString.split('T')[1].split('.')[0]; // HH:MM:SS
+      const isoString = now.toISOString();
+      const date_messages = isoString.split("T")[0]; // YYYY-MM-DD
+      const time_messages = isoString.split("T")[1].split(".")[0]; // HH:MM:SS в UTC
 
       const result = await pool.query(
          `INSERT INTO messages (date_messages, time_messages, text_messages, user_from_id, user_to_id)
           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
          [date_messages, time_messages, text_messages, user_from_id, user_to_id]
       );
-
-      res.status(201).json({
-         ...result.rows[0],
-         // Добавляем информацию о временной зоне для фронтенда
-         date_info: {
-            iso: isoString,
-            timezone: now.getTimezoneOffset()
-         }
-      });
+      res.status(201).json(result.rows[0]);
    } catch (err) {
       console.error("Ошибка:", err);
       res.status(500).json({ error: "Ошибка сервера", message: err.message });
@@ -1399,9 +1391,11 @@ app.get("/get-messages", async (req, res) => {
          return res.status(400).json({ error: 'user_id обязателен' });
       }
       const result = await pool.query(
-         `SELECT m.id, m.date_messages, m.time_messages, m.text_messages,
-               u1.login AS sender, u2.login AS receiver,
-               CASE WHEN m.user_to_id = $1 THEN m.is_read ELSE true END AS is_read
+         `SELECT m.id, 
+            TO_CHAR(m.date_messages, 'YYYY-MM-DD') as date_messages, 
+            m.time_messages, m.text_messages,
+            u1.login AS sender, u2.login AS receiver,
+            CASE WHEN m.user_to_id = $1 THEN m.is_read ELSE true END AS is_read
          FROM messages m
          JOIN users u1 ON m.user_from_id = u1.id
          JOIN users u2 ON m.user_to_id = u2.id
