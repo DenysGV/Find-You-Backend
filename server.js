@@ -342,7 +342,7 @@ app.get('/accounts', async (req, res) => {
 
 app.get('/top-accounts', async (req, res) => {
    try {
-      const limit = 10; // Получаем топ-10 аккаунтов
+      const limit = 3; // Получаем топ-10 аккаунтов
 
       let queryBase = `
          FROM accounts a
@@ -471,6 +471,10 @@ app.get('/account', async (req, res) => {
       const ratingQuery = await pool.query(`SELECT * FROM rating WHERE account_id = $1`, [id]);
       const rating = ratingQuery.rows;
 
+      // Получаем количество просмотров
+      const viewsQuery = await pool.query(`SELECT COUNT(*) FROM account_views WHERE account_id = $1`, [id]);
+      const viewsCount = parseInt(viewsQuery.rows[0].count);
+
       // Получаем комментарии
       const commentsQuery = await pool.query(`
          SELECT comments.*, users.login AS author_nickname
@@ -496,12 +500,10 @@ app.get('/account', async (req, res) => {
             if (dirExists) {
                // Получаем список файлов из директории пользователя
                const filesList = await listFiles(remotePath);
-
                // Фильтруем только изображения и видео и формируем URL-адреса
                files = filesList
                   .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.mp4'))
                   .map(file => getPublicUrl(`/${remotePath}/${file}`));
-
                console.log(`Получено ${files.length} файлов для пользователя ${remotePath}`);
             } else {
                console.log(`Директория ${remotePath} не существует на SFTP`);
@@ -513,6 +515,9 @@ app.get('/account', async (req, res) => {
       } else {
          console.log('Отсутствует identificator пользователя');
       }
+
+      // Добавляем количество просмотров к объекту пользователя
+      user.views = viewsCount;
 
       // Собираем финальный объект
       const fullAccountInfo = {
@@ -529,6 +534,38 @@ app.get('/account', async (req, res) => {
       res.json(fullAccountInfo);
    } catch (err) {
       console.error('Error in account endpoint:', err);
+      res.status(500).json({ error: 'Server error', message: err.message });
+   }
+});
+
+app.post('/add-view', async (req, res) => {
+   try {
+      const { accounts_id, user_id = null } = req.body;
+
+      // Проверяем существование аккаунта
+      const accountCheck = await pool.query("SELECT * FROM accounts WHERE Id = $1", [accounts_id]);
+      if (accountCheck.rows.length === 0) {
+         return res.status(400).json({ message: "Аккаунт не найден" });
+      }
+
+      // Добавляем запись о просмотре
+      await pool.query(
+         "INSERT INTO account_views (user_id, account_id) VALUES ($1, $2)",
+         [user_id, accounts_id]
+      );
+
+      // Возвращаем количество просмотров для этого аккаунта
+      const viewsCount = await pool.query(
+         "SELECT COUNT(*) FROM account_views WHERE account_id = $1",
+         [accounts_id]
+      );
+
+      res.status(200).json({
+         success: true,
+         views: parseInt(viewsCount.rows[0].count)
+      });
+   } catch (err) {
+      console.error('Error in add-view endpoint:', err);
       res.status(500).json({ error: 'Server error', message: err.message });
    }
 });
@@ -1280,25 +1317,22 @@ app.post("/delete-orders", async (req, res) => {
 app.post("/send-messages", async (req, res) => {
    try {
       const { text_messages, user_from_id, user_to_login } = req.body;
-
       if (!text_messages || !user_from_id || !user_to_login) {
          return res.status(400).json({ error: "Все поля обязательны" });
       }
-
       const userToResult = await pool.query("SELECT id FROM users WHERE login = $1", [user_to_login]);
-
       if (userToResult.rows.length === 0) {
          return res.status(404).json({ error: "Получатель не найден" });
       }
-
       const user_to_id = userToResult.rows[0].id;
 
+      // Создаем текущее время в UTC
       const now = new Date();
       const date_messages = now.toISOString().split("T")[0]; // YYYY-MM-DD
       const time_messages = now.toTimeString().split(" ")[0]; // HH:MM:SS
 
       const result = await pool.query(
-         `INSERT INTO messages (date_messages, time_messages, text_messages, user_from_id, user_to_id) 
+         `INSERT INTO messages (date_messages, time_messages, text_messages, user_from_id, user_to_id)
           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
          [date_messages, time_messages, text_messages, user_from_id, user_to_id]
       );
@@ -1353,26 +1387,105 @@ app.delete("/delete-messages", async (req, res) => {
 app.get("/get-messages", async (req, res) => {
    try {
       const { user_id } = req.query;
-
       if (!user_id) {
          return res.status(400).json({ error: 'user_id обязателен' });
       }
-
       const result = await pool.query(
-         `SELECT m.id, m.date_messages, m.time_messages, m.text_messages, 
-               u1.login AS sender, u2.login AS receiver
+         `SELECT m.id, m.date_messages, m.time_messages, m.text_messages,
+               u1.login AS sender, u2.login AS receiver,
+               CASE WHEN m.user_to_id = $1 THEN m.is_read ELSE true END AS is_read
          FROM messages m
          JOIN users u1 ON m.user_from_id = u1.id
          JOIN users u2 ON m.user_to_id = u2.id
-         LEFT JOIN messages_deleted d 
+         LEFT JOIN messages_deleted d
             ON m.id = d.message_id AND d.user_id = $1
          WHERE (m.user_to_id = $1 OR m.user_from_id = $1)
          AND d.message_id IS NULL  -- Исключаем скрытые пользователем сообщения
          ORDER BY m.date_messages DESC, m.time_messages DESC`,
          [user_id]
       );
-
       res.json(result.rows);
+   } catch (err) {
+      console.error("Ошибка:", err);
+      res.status(500).json({ error: "Ошибка сервера", message: err.message });
+   }
+});
+
+app.post("/mark-as-read", async (req, res) => {
+   try {
+      const { message_id, user_id } = req.body;
+
+      if (!message_id || !user_id) {
+         return res.status(400).json({ error: 'message_id и user_id обязательны' });
+      }
+
+      // Проверяем, что пользователь является получателем сообщения
+      const checkResult = await pool.query(
+         `SELECT * FROM messages WHERE id = $1 AND user_to_id = $2`,
+         [message_id, user_id]
+      );
+
+      if (checkResult.rows.length === 0) {
+         return res.status(403).json({ error: 'Доступ запрещен или сообщение не найдено' });
+      }
+
+      // Отмечаем сообщение как прочитанное
+      await pool.query(
+         `UPDATE messages SET is_read = true WHERE id = $1`,
+         [message_id]
+      );
+
+      res.json({ success: true, message: 'Сообщение отмечено как прочитанное' });
+   } catch (err) {
+      console.error("Ошибка:", err);
+      res.status(500).json({ error: "Ошибка сервера", message: err.message });
+   }
+});
+
+app.post("/mark-messages-read", async (req, res) => {
+   try {
+      const { user_id, message_ids } = req.body;
+
+      if (!user_id || !message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
+         return res.status(400).json({ error: 'user_id и message_ids (массив) обязательны' });
+      }
+
+      // Отмечаем все указанные сообщения как прочитанные
+      // Но только те, где пользователь является получателем
+      await pool.query(
+         `UPDATE messages 
+          SET is_read = true 
+          WHERE id = ANY($1::int[]) AND user_to_id = $2`,
+         [message_ids, user_id]
+      );
+
+      res.json({ success: true, message: 'Сообщения отмечены как прочитанные' });
+   } catch (err) {
+      console.error("Ошибка:", err);
+      res.status(500).json({ error: "Ошибка сервера", message: err.message });
+   }
+});
+
+app.get("/unread-count", async (req, res) => {
+   try {
+      const { user_id } = req.query;
+
+      if (!user_id) {
+         return res.status(400).json({ error: 'user_id обязателен' });
+      }
+
+      const result = await pool.query(
+         `SELECT COUNT(*) as unread_count
+          FROM messages m
+          LEFT JOIN messages_deleted d
+             ON m.id = d.message_id AND d.user_id = $1
+          WHERE m.user_to_id = $1 
+          AND m.is_read = false
+          AND d.message_id IS NULL`,
+         [user_id]
+      );
+
+      res.json({ unread_count: parseInt(result.rows[0].unread_count) });
    } catch (err) {
       console.error("Ошибка:", err);
       res.status(500).json({ error: "Ошибка сервера", message: err.message });
@@ -1554,6 +1667,51 @@ app.post("/add-role", async (req, res) => {
    } catch (err) {
       console.error("Ошибка:", err);
       res.status(500).json({ error: "Ошибка сервера", message: err.message });
+   }
+});
+
+app.get("/check-user-session", async (req, res) => {
+   try {
+      const token = req.headers.authorization?.split(' ')[1];
+      if (!token) {
+         return res.status(401).json({ error: "Токен не предоставлен" });
+      }
+
+      try {
+         // Декодируем JWT-токен
+         const decoded = jwt.verify(token, JWT_SECRET);
+
+         // Получаем актуальные данные пользователя
+         const userQuery = await pool.query(`
+         SELECT users.*, roles.name AS role 
+         FROM users
+         LEFT JOIN roles ON users.id = roles.user_id
+         WHERE users.login = $1
+       `, [decoded.login]);
+
+         if (userQuery.rows.length === 0) {
+            return res.status(404).json({ error: "Пользователь не найден" });
+         }
+
+         const user = userQuery.rows[0];
+
+         // Проверяем, совпадает ли session_id из токена с session_id в базе данных
+         if (decoded.sessionId !== user.session_id) {
+            return res.status(401).json({ error: "Сессия устарела", sessionExpired: true });
+         }
+
+         // Возвращаем актуальные данные пользователя
+         user.role = user.role || "user"; // если роли нет, ставим "user"
+         res.json({ user });
+
+      } catch (err) {
+         // Если токен невалидный
+         return res.status(401).json({ error: "Невалидный токен" });
+      }
+
+   } catch (err) {
+      console.error("Ошибка при проверке сессии:", err);
+      res.status(500).json({ error: "Ошибка сервера" });
    }
 });
 
