@@ -53,6 +53,32 @@ const pool = new Pool({
 
 export default pool;
 
+const xssOptions = {
+   whiteList: {
+      // Добавляем все теги, которые хотим поддерживать
+      span: ['class'],
+      b: [],
+      i: [],
+      u: [],
+      s: [],
+      strong: [],
+      em: [],
+      br: [],
+      h1: [],
+      h2: [],
+      h3: [],
+      blockquote: [],
+      pre: [],
+      code: [],
+      ol: [],
+      ul: [],
+      li: [],
+      p: ['class']
+      // Добавьте другие разрешенные теги по необходимости
+   }
+};
+
+const customXss = new xss.FilterXSS(xssOptions);
 
 app.use(cors());
 
@@ -65,26 +91,21 @@ app.use((req, res, next) => {
          if (typeof obj[key] === 'object') {
             sanitizeObject(obj[key]); // Рекурсивная очистка вложенных объектов
          } else if (typeof obj[key] === 'string') {
-            obj[key] = xss(obj[key]); // Очистка строк
+            obj[key] = customXss.process(obj[key]); // Используем настроенный фильтр
          }
       }
    }
 
-   // Если есть данные в теле запроса, очищаем их
+   // Остальной код middleware остается без изменений
    if (req.body) {
       sanitizeObject(req.body);
    }
-
-   // Если есть параметры в URL, очищаем их
    if (req.query) {
       sanitizeObject(req.query);
    }
-
-   // Если есть параметры в URL-пути, очищаем их
    if (req.params) {
       sanitizeObject(req.params);
    }
-
    next();
 });
 
@@ -477,10 +498,14 @@ app.get('/account', async (req, res) => {
 
       // Получаем комментарии
       const commentsQuery = await pool.query(`
-         SELECT comments.*, users.login AS author_nickname
+         SELECT comments.*, 
+            TO_CHAR(comments.date_comment, 'YYYY-MM-DD') as date_comment,
+            comments.time_comment,
+            users.login AS author_nickname
          FROM comments
          JOIN users ON comments.user_id = users.id
          WHERE comments.account_id = $1
+         ORDER BY comments.date_comment DESC, comments.time_comment DESC
       `, [id]);
       const commentsTree = buildCommentTree(commentsQuery.rows);
 
@@ -821,20 +846,20 @@ app.get('/comments', async (req, res) => {
 
 app.post("/add-comment", async (req, res) => {
    const { account_id, user_id, text, parent_id = null } = req.body;
-
-   // Текущая дата и время
-   const date_comment = new Date().toISOString().split('T')[0]; // Получаем только дату
-   const time_comment = new Date().toISOString().split('T')[1].slice(0, 8); // Получаем время
+   // Store date and time in UTC format
+   const now = new Date();
+   const date_comment = now.toISOString().split('T')[0]; // Get date in YYYY-MM-DD format (UTC)
+   const time_comment = now.toISOString().split('T')[1].slice(0, 8); // Get time in HH:MM:SS format (UTC)
 
    try {
-      // Вставляем новый комментарий в таблицу comments
+      // Insert the new comment into the comments table
       const result = await pool.query(
          "INSERT INTO comments (account_id, user_id, text, parent_id, date_comment, time_comment) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
          [account_id, user_id, text, parent_id, date_comment, time_comment]
       );
       res.status(201).json({
          success: true,
-         comment: result.rows[0], // Возвращаем добавленный комментарий
+         comment: result.rows[0], // Return the added comment
       });
    } catch (error) {
       console.error("Error adding comment:", error);
@@ -1386,13 +1411,41 @@ app.delete("/delete-messages", async (req, res) => {
 
 app.get("/get-messages", async (req, res) => {
    try {
-      const { user_id } = req.query;
+      const { user_id, page = 1, limit = 10, filter = 'incoming' } = req.query;
       if (!user_id) {
          return res.status(400).json({ error: 'user_id обязателен' });
       }
-      const result = await pool.query(
-         `SELECT m.id, 
-            TO_CHAR(m.date_messages, 'YYYY-MM-DD') as date_messages, 
+
+      const offset = (page - 1) * limit;
+      let whereClause;
+      let countWhereClause;
+
+      // Определяем условие WHERE в зависимости от фильтра
+      if (filter === 'sent') {
+         whereClause = "m.user_from_id = $1 AND d.message_id IS NULL";
+         countWhereClause = "m.user_from_id = $1 AND d.message_id IS NULL";
+      } else if (filter === 'unread') {
+         whereClause = "m.user_to_id = $1 AND m.is_read = false AND d.message_id IS NULL";
+         countWhereClause = "m.user_to_id = $1 AND m.is_read = false AND d.message_id IS NULL";
+      } else { // incoming по умолчанию
+         whereClause = "m.user_to_id = $1 AND d.message_id IS NULL";
+         countWhereClause = "m.user_to_id = $1 AND d.message_id IS NULL";
+      }
+
+      // Запрос общего количества сообщений для пагинации с учетом фильтра
+      const countResult = await pool.query(
+         `SELECT COUNT(m.id)
+         FROM messages m
+         LEFT JOIN messages_deleted d
+            ON m.id = d.message_id AND d.user_id = $1
+         WHERE ${countWhereClause}`,
+         [user_id]
+      );
+
+      // Запрос данных с пагинацией и фильтрацией
+      const messagesResult = await pool.query(
+         `SELECT m.id,
+            TO_CHAR(m.date_messages, 'YYYY-MM-DD') as date_messages,
             m.time_messages, m.text_messages,
             u1.login AS sender, u2.login AS receiver,
             CASE WHEN m.user_to_id = $1 THEN m.is_read ELSE true END AS is_read
@@ -1401,12 +1454,34 @@ app.get("/get-messages", async (req, res) => {
          JOIN users u2 ON m.user_to_id = u2.id
          LEFT JOIN messages_deleted d
             ON m.id = d.message_id AND d.user_id = $1
-         WHERE (m.user_to_id = $1 OR m.user_from_id = $1)
-         AND d.message_id IS NULL  -- Исключаем скрытые пользователем сообщения
-         ORDER BY m.date_messages DESC, m.time_messages DESC`,
+         WHERE ${whereClause}
+         ORDER BY m.date_messages DESC, m.time_messages DESC
+         LIMIT $2 OFFSET $3`,
+         [user_id, limit, offset]
+      );
+
+      // Запрос для получения количества непрочитанных
+      const unreadResult = await pool.query(
+         `SELECT COUNT(*) as unread_count
+         FROM messages m
+         LEFT JOIN messages_deleted d
+            ON m.id = d.message_id AND d.user_id = $1
+         WHERE m.user_to_id = $1
+         AND m.is_read = false
+         AND d.message_id IS NULL`,
          [user_id]
       );
-      res.json(result.rows);
+
+      const totalMessages = parseInt(countResult.rows[0].count, 10);
+      const totalPages = Math.ceil(totalMessages / limit);
+      const unreadCount = parseInt(unreadResult.rows[0].unread_count, 10);
+
+      res.json({
+         messages: messagesResult.rows,
+         totalPages,
+         currentPage: parseInt(page),
+         unreadCount
+      });
    } catch (err) {
       console.error("Ошибка:", err);
       res.status(500).json({ error: "Ошибка сервера", message: err.message });
@@ -1535,14 +1610,11 @@ app.get('/users', async (req, res) => {
 
 app.delete('/users-delete', async (req, res) => {
    try {
-      const { users } = req.body;
+      const { userIds } = req.body;
 
-      if (!Array.isArray(users) || users.length === 0) {
-         return res.status(400).json({ error: 'Неверный формат запроса, массив users обязателен' });
+      if (!Array.isArray(userIds) || userIds.length === 0) {
+         return res.status(400).json({ error: 'Неверный формат запроса, массив userIds обязателен' });
       }
-
-      // Извлекаем ID пользователей
-      const userIds = users.map(user => user.id);
 
       // Удаляем пользователей с переданными ID
       const query = `DELETE FROM users WHERE id = ANY($1) RETURNING id`;
@@ -1551,6 +1623,7 @@ app.delete('/users-delete', async (req, res) => {
 
       res.json({ message: 'Пользователи удалены', deletedUsers: rows.map(row => row.id) });
    } catch (err) {
+      console.error('Ошибка при удалении пользователей:', err);
       res.status(500).json({ error: 'Ошибка сервера', message: err.message });
    }
 });
@@ -2364,16 +2437,29 @@ app.post("/update-account-date", async (req, res) => {
    try {
       const { id, new_date_of_create } = req.body; // Дата и ID аккаунта
 
+      // Проверяем, что имеем валидную дату или null
+      let dateValue = null;
+      if (new_date_of_create) {
+         // Парсим дату в объект Date
+         const dateObj = new Date(new_date_of_create);
+         // Форматируем дату в формат PostgreSQL с сохранением времени
+         dateValue = dateObj.toISOString();
+      }
+
+      // Добавляем логирование для отладки
+      console.log("ID:", id, "Новая дата:", dateValue);
+
       const result = await pool.query(
          `UPDATE accounts
-          SET date_of_create = $1
+          SET date_of_create = $1::timestamp with time zone
           WHERE id = $2
           RETURNING *`,  // Возвращаем обновленную строку для проверки
-         [new_date_of_create, id]
+         [dateValue, id]
       );
 
       // Если аккаунт найден и обновлен
       if (result.rows.length > 0) {
+         console.log("Обновленная запись:", result.rows[0]);
          res.json(result.rows[0]);  // Возвращаем обновленный аккаунт
       } else {
          res.status(404).json({ error: "Аккаунт не найден" });
