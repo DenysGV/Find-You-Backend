@@ -242,7 +242,7 @@ function parseTxtFile(filePath) {
 
 app.get('/accounts', async (req, res) => {
    try {
-      let { search, city_id, tag_id, date_range, page = 1, limit = 40 } = req.query;
+      let { search, city_id, tag_id, date_range, page = 1, limit = 40, admin_mode = 'false' } = req.query;
       page = parseInt(page);
       limit = parseInt(limit);
       const offset = (page - 1) * limit;
@@ -308,6 +308,13 @@ app.get('/accounts', async (req, res) => {
             console.error("Invalid date_range format:", error);
             return res.status(400).json({ error: "Invalid date_range format. It should be a JSON array." });
          }
+      }
+
+      // Фильтр по дате создания (только для не-админского режима)
+      if (admin_mode !== 'true') {
+         const currentDate = new Date().toISOString().split('T')[0]; // Текущая дата в формате YYYY-MM-DD
+         conditions.push(`(a.date_of_create IS NULL OR a.date_of_create::DATE <= $${queryParams.length + 1}::DATE)`);
+         queryParams.push(currentDate);
       }
 
       // Применяем фильтры
@@ -606,7 +613,7 @@ app.get('/cities', authMiddleware, async (req, res) => {
             COUNT(a.id) AS Account_Count
          FROM accounts a
          JOIN city c ON a."City_id" = c.id
-         WHERE (a.date_of_create IS NOT NULL OR a.date_of_create <= $1)
+         WHERE a.date_of_create IS NOT NULL AND a.date_of_create <= $1
          GROUP BY c.id, c.name_ru
          ORDER BY Account_Count DESC;
       `, [currentDate]);
@@ -626,11 +633,10 @@ app.get('/tags', async (req, res) => {
          SELECT 
             t.id, 
             t.name_ru, 
-            COUNT(td.tag_id) AS usage_count
+            COUNT(CASE WHEN a.id IS NOT NULL AND a.date_of_create IS NOT NULL AND a.date_of_create <= $1 THEN td.tag_id END) AS usage_count
          FROM tags t
          LEFT JOIN tags_detail td ON t.id = td.tag_id
          LEFT JOIN accounts a ON td.account_id = a.id
-         WHERE (a.date_of_create IS NOT NULL OR a.date_of_create <= $1 OR a.id IS NULL)
          GROUP BY t.id, t.name_ru
          ORDER BY usage_count DESC;
       `, [currentDate]);
@@ -871,28 +877,25 @@ app.post("/add-comment", async (req, res) => {
 });
 
 app.put("/update-comment", async (req, res) => {
-   const { author_nickname, text, parent_id } = req.body;
-
+   // Изменяем деструктуризацию, чтобы соответствовать клиентскому коду
+   const { comment_id, text } = req.body;
    try {
-      // Проверяем, существует ли комментарий с таким parent_id
+      // Проверяем, существует ли комментарий с таким id
       const existingComment = await pool.query(
          "SELECT * FROM comments WHERE id = $1",
-         [parent_id]
+         [comment_id]
       );
-
       if (existingComment.rows.length === 0) {
          return res.status(404).json({
             success: false,
             message: "Комментарий не найден",
          });
       }
-
       // Обновляем комментарий
       const updatedComment = await pool.query(
          "UPDATE comments SET text = $1 WHERE id = $2 RETURNING *",
-         [text, parent_id]
+         [text, comment_id]
       );
-
       res.status(200).json({
          success: true,
          message: "Комментарий обновлен",
@@ -1409,9 +1412,57 @@ app.delete("/delete-messages", async (req, res) => {
    }
 });
 
+app.delete("/delete-messages-global", async (req, res) => {
+   try {
+      const { user_id, message_ids } = req.body;
+
+      if (!user_id || !Array.isArray(message_ids) || message_ids.length === 0) {
+         return res.status(400).json({ error: 'user_id и message_ids (массив) обязательны' });
+      }
+
+      // Убираем дубликаты
+      const uniqueMessageIds = [...new Set(message_ids)];
+
+      // Проверяем, имеет ли пользователь права на удаление этих сообщений
+      // (только отправитель может глобально удалить сообщение)
+      const userMessagesResult = await pool.query(
+         `SELECT id FROM messages 
+          WHERE id = ANY($1) AND user_from_id = $2`,
+         [uniqueMessageIds, user_id]
+      );
+
+      const userMessageIds = userMessagesResult.rows.map(row => row.id);
+
+      if (userMessageIds.length === 0) {
+         return res.status(403).json({ error: 'Удалять для обоих может только отправитель' });
+      }
+
+      // Физическое удаление сообщений из базы данных
+      await pool.query(
+         `DELETE FROM messages WHERE id = ANY($1)`,
+         [userMessageIds]
+      );
+
+      // Удаляем записи из messages_deleted, так как сообщения удалены физически
+      await pool.query(
+         `DELETE FROM messages_deleted WHERE message_id = ANY($1)`,
+         [userMessageIds]
+      );
+
+      res.json({
+         success: true,
+         message: "Сообщения удалены для обоих пользователей",
+         deleted_messages: userMessageIds
+      });
+   } catch (err) {
+      console.error("Ошибка:", err);
+      res.status(500).json({ error: "Ошибка сервера", message: err.message });
+   }
+});
+
 app.get("/get-messages", async (req, res) => {
    try {
-      const { user_id, page = 1, limit = 10, filter = 'incoming' } = req.query;
+      const { user_id, page = 1, limit = 30, filter = 'incoming' } = req.query;
       if (!user_id) {
          return res.status(400).json({ error: 'user_id обязателен' });
       }
