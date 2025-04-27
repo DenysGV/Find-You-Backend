@@ -247,14 +247,9 @@ app.get('/accounts', async (req, res) => {
       limit = parseInt(limit);
       const offset = (page - 1) * limit;
 
-      let queryBase = `
-         FROM accounts a
-         LEFT JOIN tags_detail td ON a.id = td.account_id
-         LEFT JOIN tags t ON td.tag_id = t.id
-         LEFT JOIN city c ON a."City_id" = c.id
-      `;
+      let queryBase = '';
 
-      // Добавляем джойн с рейтингами, если нужна сортировка по рейтингу
+      // В зависимости от sort_by_rating используем разные базовые запросы
       if (sort_by_rating === 'true') {
          queryBase = `
             FROM accounts a
@@ -266,6 +261,13 @@ app.get('/accounts', async (req, res) => {
                FROM rating
                GROUP BY account_id
             ) r ON a.id = r.account_id
+            LEFT JOIN tags_detail td ON a.id = td.account_id
+            LEFT JOIN tags t ON td.tag_id = t.id
+            LEFT JOIN city c ON a."City_id" = c.id
+         `;
+      } else {
+         queryBase = `
+            FROM accounts a
             LEFT JOIN tags_detail td ON a.id = td.account_id
             LEFT JOIN tags t ON td.tag_id = t.id
             LEFT JOIN city c ON a."City_id" = c.id
@@ -344,33 +346,51 @@ app.get('/accounts', async (req, res) => {
       const totalItems = countResult.rows[0].total;
       const totalPages = Math.ceil(totalItems / limit);
 
-      // Определяем порядок сортировки
-      let orderByClause = "ORDER BY a.date_of_create DESC";
-      if (sort_by_rating === 'true') {
-         orderByClause = `
-            ORDER BY 
-               COALESCE((r.average_rating * r.rating_count + 3) / (r.rating_count + 1), 0) DESC, 
-               r.rating_count DESC, 
-               average_rating DESC
-         `;
-      }
+      // Определяем поля выборки и порядок сортировки в зависимости от режима
+      let selectClause = '';
+      let orderByClause = '';
 
-      // Получаем данные аккаунтов
-      let selectClause = `
-         SELECT DISTINCT a.id, a.name, a."City_id", a.date_of_create, a.date_of_birth, a.identificator, a.photo, a.check_video
-      `;
-
-      // Добавляем поля рейтинга, если нужна сортировка по рейтингу
       if (sort_by_rating === 'true') {
+         // Для сортировки по рейтингу добавляем все необходимые поля в SELECT
          selectClause = `
             SELECT DISTINCT 
-               a.id, a.name, a."City_id", a.date_of_create, a.date_of_birth, a.identificator, a.photo, a.check_video,
+               a.id, 
+               a.name, 
+               a."City_id", 
+               a.date_of_create, 
+               a.date_of_birth, 
+               a.identificator, 
+               a.photo, 
+               a.check_video,
                COALESCE(r.average_rating, 0) as average_rating,
                COALESCE(r.rating_count, 0) as rating_count,
                COALESCE((r.average_rating * r.rating_count + 3) / (r.rating_count + 1), 0) as weighted_rating
          `;
+
+         orderByClause = `
+            ORDER BY 
+               weighted_rating DESC, 
+               rating_count DESC, 
+               average_rating DESC
+         `;
+      } else {
+         // Стандартная выборка и сортировка
+         selectClause = `
+            SELECT DISTINCT 
+               a.id, 
+               a.name, 
+               a."City_id", 
+               a.date_of_create, 
+               a.date_of_birth, 
+               a.identificator, 
+               a.photo, 
+               a.check_video
+         `;
+
+         orderByClause = `ORDER BY a.date_of_create DESC`;
       }
 
+      // Составляем финальный запрос
       let query = `
          ${selectClause}
          ${queryBase} 
