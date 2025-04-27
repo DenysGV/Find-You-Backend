@@ -242,7 +242,7 @@ function parseTxtFile(filePath) {
 
 app.get('/accounts', async (req, res) => {
    try {
-      let { search, city_id, tag_id, date_range, page = 1, limit = 40, admin_mode = 'false' } = req.query;
+      let { search, city_id, tag_id, date_range, page = 1, limit = 40, admin_mode = 'false', sort_by_rating = 'false' } = req.query;
       page = parseInt(page);
       limit = parseInt(limit);
       const offset = (page - 1) * limit;
@@ -253,6 +253,24 @@ app.get('/accounts', async (req, res) => {
          LEFT JOIN tags t ON td.tag_id = t.id
          LEFT JOIN city c ON a."City_id" = c.id
       `;
+
+      // Добавляем джойн с рейтингами, если нужна сортировка по рейтингу
+      if (sort_by_rating === 'true') {
+         queryBase = `
+            FROM accounts a
+            LEFT JOIN (
+               SELECT
+                  account_id,
+                  AVG(rate) as average_rating,
+                  COUNT(id) as rating_count
+               FROM rating
+               GROUP BY account_id
+            ) r ON a.id = r.account_id
+            LEFT JOIN tags_detail td ON a.id = td.account_id
+            LEFT JOIN tags t ON td.tag_id = t.id
+            LEFT JOIN city c ON a."City_id" = c.id
+         `;
+      }
 
       let queryParams = [];
       let conditions = [];
@@ -326,12 +344,38 @@ app.get('/accounts', async (req, res) => {
       const totalItems = countResult.rows[0].total;
       const totalPages = Math.ceil(totalItems / limit);
 
+      // Определяем порядок сортировки
+      let orderByClause = "ORDER BY a.date_of_create DESC";
+      if (sort_by_rating === 'true') {
+         orderByClause = `
+            ORDER BY 
+               COALESCE((r.average_rating * r.rating_count + 3) / (r.rating_count + 1), 0) DESC, 
+               r.rating_count DESC, 
+               average_rating DESC
+         `;
+      }
+
       // Получаем данные аккаунтов
+      let selectClause = `
+         SELECT DISTINCT a.id, a.name, a."City_id", a.date_of_create, a.date_of_birth, a.identificator, a.photo, a.check_video
+      `;
+
+      // Добавляем поля рейтинга, если нужна сортировка по рейтингу
+      if (sort_by_rating === 'true') {
+         selectClause = `
+            SELECT DISTINCT 
+               a.id, a.name, a."City_id", a.date_of_create, a.date_of_birth, a.identificator, a.photo, a.check_video,
+               COALESCE(r.average_rating, 0) as average_rating,
+               COALESCE(r.rating_count, 0) as rating_count,
+               COALESCE((r.average_rating * r.rating_count + 3) / (r.rating_count + 1), 0) as weighted_rating
+         `;
+      }
+
       let query = `
-         SELECT DISTINCT a.id, a.name, a."City_id", a.date_of_create, a.date_of_birth, a.identificator, a.photo, a.check_video 
+         ${selectClause}
          ${queryBase} 
          ${whereClause}
-         ORDER BY a.date_of_create DESC 
+         ${orderByClause}
          LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
       `;
 
