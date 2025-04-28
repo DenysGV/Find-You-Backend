@@ -332,8 +332,8 @@ app.get('/accounts', async (req, res) => {
 
       // Фильтр по дате создания (только для не-админского режима)
       if (admin_mode !== 'true') {
-         const currentDate = new Date().toISOString().split('T')[0]; // Текущая дата в формате YYYY-MM-DD
-         conditions.push(`(a.date_of_create IS NULL OR a.date_of_create::DATE <= $${queryParams.length + 1}::DATE)`);
+         const currentDate = new Date().toISOString().split('T')[0];
+         conditions.push(`a.date_of_create IS NOT NULL AND a.date_of_create::DATE <= $${queryParams.length + 1}::DATE`);
          queryParams.push(currentDate);
       }
 
@@ -2552,24 +2552,13 @@ app.post("/update-account-date", async (req, res) => {
    try {
       const { id, new_date_of_create } = req.body; // Дата и ID аккаунта
 
-      // Проверяем, что имеем валидную дату или null
-      let dateValue = null;
-      if (new_date_of_create) {
-         // Парсим дату в объект Date
-         const dateObj = new Date(new_date_of_create);
-         // Форматируем дату в формат PostgreSQL с сохранением времени
-         dateValue = dateObj.toISOString();
-      }
-
-      // Добавляем логирование для отладки
-      console.log("ID:", id, "Новая дата:", dateValue);
-
+      // Важное изменение здесь: передаем null напрямую в запрос
       const result = await pool.query(
          `UPDATE accounts
-          SET date_of_create = $1::timestamp with time zone
+          SET date_of_create = $1
           WHERE id = $2
           RETURNING *`,  // Возвращаем обновленную строку для проверки
-         [dateValue, id]
+         [new_date_of_create, id]
       );
 
       // Если аккаунт найден и обновлен
