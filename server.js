@@ -371,10 +371,11 @@ app.get('/accounts', async (req, res) => {
             ORDER BY 
                weighted_rating DESC, 
                rating_count DESC, 
-               average_rating DESC
+               average_rating DESC,
+               a.id ASC
          `;
       } else {
-         // Стандартная выборка и сортировка
+         // Стандартная выборка и сортировка с добавлением ID как второго критерия
          selectClause = `
             SELECT DISTINCT 
                a.id, 
@@ -387,7 +388,7 @@ app.get('/accounts', async (req, res) => {
                a.check_video
          `;
 
-         orderByClause = `ORDER BY a.date_of_create DESC`;
+         orderByClause = `ORDER BY a.date_of_create DESC, a.id ASC`;
       }
 
       // Составляем финальный запрос
