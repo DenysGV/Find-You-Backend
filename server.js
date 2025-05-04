@@ -372,10 +372,10 @@ app.get('/accounts', async (req, res) => {
                weighted_rating DESC, 
                rating_count DESC, 
                average_rating DESC,
-               a.id ASC
+               a.id DESC
          `;
       } else {
-         // Стандартная выборка и сортировка с добавлением ID как второго критерия
+         // Стандартная выборка и сортировка с изменением порядка сортировки ID на DESC
          selectClause = `
             SELECT DISTINCT 
                a.id, 
@@ -388,7 +388,7 @@ app.get('/accounts', async (req, res) => {
                a.check_video
          `;
 
-         orderByClause = `ORDER BY a.date_of_create DESC, a.id ASC`;
+         orderByClause = `ORDER BY a.date_of_create DESC, a.id DESC`;
       }
 
       // Составляем финальный запрос
@@ -1910,6 +1910,22 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
    try {
       if (!req.file) return res.status(400).json({ error: "Файл не найден" });
 
+      // Получаем текущую дату для формирования уникального имени файла
+      const now = new Date();
+      const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
+      const originalFileName = req.file.originalname || 'unknown-file.txt';
+      const safeFileName = originalFileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const newFileName = `${timestamp}_${safeFileName}`;
+
+      // Загружаем файл на SFTP в папку indices перед обработкой
+      try {
+         await uploadFile(req.file.path, 'indices', newFileName);
+         console.log(`Файл успешно сохранен на SFTP: indices/${newFileName}`);
+      } catch (sftpError) {
+         console.error("Ошибка сохранения файла на SFTP:", sftpError);
+         // Продолжаем выполнение, не прерывая процесс из-за ошибки с SFTP
+      }
+
       const accounts = await parseTxtFile(req.file.path);
 
       fs.unlinkSync(req.file.path); // Удаляем временный файл
@@ -2186,7 +2202,7 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
          }
       }
 
-      res.json({ success: true });
+      res.json({ success: true, filename: newFileName });
    } catch (err) {
       console.error("Ошибка:", err);
       res.status(500).json({ error: "Ошибка сервера", message: err.message });
@@ -2735,6 +2751,83 @@ app.get('/sections', async (req, res) => {
    } catch (err) {
       console.error('Ошибка:', err);
       res.status(500).json({ error: 'Server error', message: err.message });
+   }
+});
+
+app.get("/site-status", async (req, res) => {
+   try {
+      const result = await pool.query("SELECT value FROM site_settings WHERE key = $1", ['site_enabled']);
+
+      // Если настройка есть в базе
+      if (result.rows.length > 0) {
+         const isEnabled = result.rows[0].value === '1';
+         return res.json({ enabled: isEnabled });
+      }
+
+      // Если настройки нет, создаем её (по умолчанию сайт включен)
+      await pool.query("INSERT INTO site_settings (key, value) VALUES ($1, $2)", ['site_enabled', '1']);
+      return res.json({ enabled: true });
+   } catch (error) {
+      console.error('Ошибка при получении статуса сайта:', error);
+      return res.status(500).json({ error: 'Ошибка сервера при получении статуса сайта' });
+   }
+});
+
+// Изменение статуса сайта (только для администраторов)
+app.post("/site-status", async (req, res) => {
+   try {
+      // Получаем логин и новый статус из тела запроса
+      const { login, enabled } = req.body;
+
+      if (!login || typeof enabled !== 'boolean') {
+         return res.status(400).json({ error: 'Неверный формат данных' });
+      }
+
+      // Проверяем, существует ли пользователь и является ли он админом
+      // Сначала находим пользователя по логину
+      const userResult = await pool.query("SELECT id FROM users WHERE login = $1", [login]);
+
+      if (userResult.rows.length === 0) {
+         return res.status(404).json({ error: 'Пользователь не найден' });
+      }
+
+      const userId = userResult.rows[0].id;
+
+      // Проверяем, имеет ли пользователь роль 'admin'
+      const roleResult = await pool.query(
+         "SELECT * FROM roles WHERE user_id = $1 AND name = $2",
+         [userId, 'admin']
+      );
+
+      if (roleResult.rows.length === 0) {
+         return res.status(403).json({
+            error: 'Доступ запрещен. Только администратор может изменять статус сайта'
+         });
+      }
+
+      // Если пользователь является админом, обновляем статус в базе данных
+      await pool.query(
+         "UPDATE site_settings SET value = $1, updated_at = CURRENT_TIMESTAMP WHERE key = $2",
+         [enabled ? '1' : '0', 'site_enabled']
+      );
+
+      // Если записи не существует, создаем её
+      const updateResult = await pool.query("SELECT * FROM site_settings WHERE key = $1", ['site_enabled']);
+      if (updateResult.rows.length === 0) {
+         await pool.query(
+            "INSERT INTO site_settings (key, value) VALUES ($1, $2)",
+            ['site_enabled', enabled ? '1' : '0']
+         );
+      }
+
+      return res.json({
+         success: true,
+         message: enabled ? 'Сайт включен' : 'Сайт выключен',
+         enabled
+      });
+   } catch (error) {
+      console.error('Ошибка при изменении статуса сайта:', error);
+      return res.status(500).json({ error: 'Ошибка сервера при изменении статуса сайта' });
    }
 });
 
