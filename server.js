@@ -667,21 +667,25 @@ app.post('/add-view', async (req, res) => {
    }
 });
 
+// Исправленный эндпоинт для получения городов с учетом отложенной публикации
 app.get('/cities', authMiddleware, async (req, res) => {
    try {
-      const currentDate = new Date().toISOString().split('T')[0]; // Получаем текущую дату в формате YYYY-MM-DD
+      // Используем текущую дату и время для корректного сравнения
+      const currentDateTime = new Date().toISOString();
 
       const result = await pool.query(`
          SELECT
-            c.id AS City_ID,
-            c.name_ru AS City_Name,
-            COUNT(a.id) AS Account_Count
+            c.id AS city_id,
+            c.name_ru AS city_name,
+            COUNT(a.id) AS account_count
          FROM accounts a
          JOIN city c ON a."City_id" = c.id
-         WHERE a.date_of_create IS NOT NULL AND a.date_of_create <= $1
+         WHERE 
+            (a.date_of_create IS NULL OR a.date_of_create <= $1)
          GROUP BY c.id, c.name_ru
-         ORDER BY Account_Count DESC;
-      `, [currentDate]);
+         HAVING COUNT(a.id) > 0
+         ORDER BY account_count DESC;
+      `, [currentDateTime]);
 
       res.json(result.rows);
    } catch (err) {
@@ -690,23 +694,32 @@ app.get('/cities', authMiddleware, async (req, res) => {
    }
 });
 
+// Исправленный эндпоинт для получения тегов с учетом отложенной публикации
 app.get('/tags', async (req, res) => {
    try {
-      const currentDate = new Date().toISOString().split('T')[0]; // Получаем текущую дату в формате YYYY-MM-DD
+      // Используем текущую дату и время для корректного сравнения
+      const currentDateTime = new Date().toISOString();
 
       const result = await pool.query(`
-         SELECT 
-            t.id, 
-            t.name_ru, 
-            COUNT(CASE WHEN a.id IS NOT NULL AND a.date_of_create IS NOT NULL AND a.date_of_create <= $1 THEN td.tag_id END) AS usage_count
+         SELECT
+            t.id,
+            t.name_ru,
+            COUNT(DISTINCT CASE 
+                  WHEN a.id IS NOT NULL AND 
+                       (a.date_of_create IS NULL OR a.date_of_create <= $1) 
+                  THEN a.id 
+                  END) AS usage_count
          FROM tags t
          LEFT JOIN tags_detail td ON t.id = td.tag_id
          LEFT JOIN accounts a ON td.account_id = a.id
          GROUP BY t.id, t.name_ru
          ORDER BY usage_count DESC;
-      `, [currentDate]);
+      `, [currentDateTime]);
 
-      res.json(result.rows);
+      // Отфильтруем теги с нулевым счетчиком перед отправкой
+      const filteredTags = result.rows.filter(tag => tag.usage_count > 0);
+
+      res.json(filteredTags);
    } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
