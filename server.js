@@ -667,7 +667,7 @@ app.post('/add-view', async (req, res) => {
    }
 });
 
-// Исправленный эндпоинт для получения городов с учетом отложенной публикации
+// Финальный эндпоинт для получения городов - аккаунты с NULL датой НЕ учитываются
 app.get('/cities', authMiddleware, async (req, res) => {
    try {
       // Используем текущую дату и время для корректного сравнения
@@ -681,7 +681,7 @@ app.get('/cities', authMiddleware, async (req, res) => {
          FROM accounts a
          JOIN city c ON a."City_id" = c.id
          WHERE 
-            (a.date_of_create IS NULL OR a.date_of_create <= $1)
+            a.date_of_create IS NOT NULL AND a.date_of_create <= $1
          GROUP BY c.id, c.name_ru
          HAVING COUNT(a.id) > 0
          ORDER BY account_count DESC;
@@ -694,7 +694,7 @@ app.get('/cities', authMiddleware, async (req, res) => {
    }
 });
 
-// Исправленный эндпоинт для получения тегов с учетом отложенной публикации
+// Финальный эндпоинт для получения тегов - аккаунты с NULL датой НЕ учитываются
 app.get('/tags', async (req, res) => {
    try {
       // Используем текущую дату и время для корректного сравнения
@@ -706,20 +706,24 @@ app.get('/tags', async (req, res) => {
             t.name_ru,
             COUNT(DISTINCT CASE 
                   WHEN a.id IS NOT NULL AND 
-                       (a.date_of_create IS NULL OR a.date_of_create <= $1) 
+                       a.date_of_create IS NOT NULL AND 
+                       a.date_of_create <= $1
                   THEN a.id 
                   END) AS usage_count
          FROM tags t
          LEFT JOIN tags_detail td ON t.id = td.tag_id
          LEFT JOIN accounts a ON td.account_id = a.id
          GROUP BY t.id, t.name_ru
+         HAVING COUNT(DISTINCT CASE 
+                  WHEN a.id IS NOT NULL AND 
+                       a.date_of_create IS NOT NULL AND 
+                       a.date_of_create <= $1
+                  THEN a.id 
+                  END) > 0
          ORDER BY usage_count DESC;
       `, [currentDateTime]);
 
-      // Отфильтруем теги с нулевым счетчиком перед отправкой
-      const filteredTags = result.rows.filter(tag => tag.usage_count > 0);
-
-      res.json(filteredTags);
+      res.json(result.rows);
    } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
