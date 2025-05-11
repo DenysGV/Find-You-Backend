@@ -217,7 +217,7 @@ function parseTxtFile(filePath) {
             tw: getAllValues('tw'),
             girl: getFirstValue('girl'),
             boy: getFirstValue('boy'),
-            vk: getFirstValue('vk'),
+            vk: getAllValues('vk'),
             email: getAllValues('email'),
             tg: getAllValues('tg'),
             tik: getAllValues('tik'),
@@ -238,6 +238,103 @@ function parseTxtFile(filePath) {
 
       resolve(readyAccounts);
    });
+}
+
+function parseDateOfBirth(drValue) {
+   if (!drValue || drValue.trim() === '') {
+      return null;
+   }
+
+   const drTrimmed = drValue.trim();
+
+   // Проверка на формат "DD.MM.YYYY (возраст)" или "YYYY.MM.DD (возраст)"
+   const dateWithAgeRegex = /^(\d{1,2}\.\d{1,2}\.\d{4}|\d{4}\.\d{1,2}\.\d{1,2}|\d{4}-\d{1,2}-\d{1,2})\s*\(\d+\)$/;
+   if (dateWithAgeRegex.test(drTrimmed)) {
+      // Извлекаем только часть с датой (до скобок)
+      const dateOnly = drTrimmed.replace(/\s*\(\d+\)$/, '').trim();
+
+      // Теперь обрабатываем эту часть как обычную дату
+      if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(dateOnly)) {
+         // Формат DD.MM.YYYY
+         const [day, month, year] = dateOnly.split('.').map(part => parseInt(part, 10));
+
+         // Простая валидация даты
+         if (year >= 1900 && year <= 2100 &&
+            month >= 1 && month <= 12 &&
+            day >= 1 && day <= 31) {
+            return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+         }
+      }
+      else if (/^\d{4}\.\d{1,2}\.\d{1,2}$/.test(dateOnly)) {
+         // Формат YYYY.MM.DD
+         const [year, month, day] = dateOnly.split('.').map(part => parseInt(part, 10));
+
+         // Простая валидация даты
+         if (year >= 1900 && year <= 2100 &&
+            month >= 1 && month <= 12 &&
+            day >= 1 && day <= 31) {
+            return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+         }
+      }
+      else if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(dateOnly)) {
+         // Формат YYYY-MM-DD
+         const [year, month, day] = dateOnly.split('-').map(part => parseInt(part, 10));
+
+         // Простая валидация даты
+         if (year >= 1900 && year <= 2100 &&
+            month >= 1 && month <= 12 &&
+            day >= 1 && day <= 31) {
+            return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+         }
+      }
+   }
+
+   // Проверка, является ли значение числом (возрастом)
+   if (/^\d+$/.test(drTrimmed)) {
+      // Обработка возраста (как было раньше)
+      const currentYear = new Date().getFullYear();
+      const birthYear = currentYear - parseInt(drTrimmed, 10);
+      return `${birthYear}-01-01`;
+   }
+
+   // Проверка, является ли значение датой в формате DD.MM.YYYY
+   else if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(drTrimmed)) {
+      const [day, month, year] = drTrimmed.split('.').map(part => parseInt(part, 10));
+
+      // Простая валидация даты
+      if (year >= 1900 && year <= 2100 &&
+         month >= 1 && month <= 12 &&
+         day >= 1 && day <= 31) {
+         return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+      }
+   }
+
+   // Проверка, является ли значение датой в формате YYYY.MM.DD
+   else if (/^\d{4}\.\d{1,2}\.\d{1,2}$/.test(drTrimmed)) {
+      const [year, month, day] = drTrimmed.split('.').map(part => parseInt(part, 10));
+
+      // Простая валидация даты
+      if (year >= 1900 && year <= 2100 &&
+         month >= 1 && month <= 12 &&
+         day >= 1 && day <= 31) {
+         return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+      }
+   }
+
+   // Проверка на формат YYYY-MM-DD (который уже готов для SQL)
+   else if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(drTrimmed)) {
+      const [year, month, day] = drTrimmed.split('-').map(part => parseInt(part, 10));
+
+      // Простая валидация даты
+      if (year >= 1900 && year <= 2100 &&
+         month >= 1 && month <= 12 &&
+         day >= 1 && day <= 31) {
+         return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+      }
+   }
+
+   // Если формат не распознан или дата невалидна, возвращаем null
+   return null;
 }
 
 app.get('/accounts', async (req, res) => {
@@ -277,36 +374,53 @@ app.get('/accounts', async (req, res) => {
       let queryParams = [];
       let conditions = [];
 
-      // Фильтр по ID города
+      // Фильтр по ID города (если выбран конкретный город)
       if (city_id) {
          conditions.push(`a."City_id" = $${queryParams.length + 1}`);
          queryParams.push(city_id);
       }
 
-      // Фильтр по ID тега
+      // Фильтр по ID тега (если выбран конкретный тег)
       if (tag_id) {
          conditions.push(`t.id = $${queryParams.length + 1}`);
          queryParams.push(tag_id);
       }
 
-      // Фильтр по текстовому поиску
+      // Улучшенный фильтр по текстовому поиску
       if (search && search.trim() !== "") {
-         const searchQuery = `%${search.toLowerCase()}%`;
+         // Разбиваем строку поиска на отдельные слова
+         const searchTerms = search.trim().split(/\s+/).filter(term => term);
 
-         // Фильтр по возрасту
-         if (!isNaN(search)) {
-            const age = parseInt(search);
-            conditions.push(`DATE_PART('year', AGE(a.date_of_birth::DATE)) = $${queryParams.length + 1}`);
-            queryParams.push(age);
-         } else {
-            conditions.push(`
-               LOWER(a.name) LIKE LOWER($${queryParams.length + 1}) 
-               OR LOWER(c.name_ru) LIKE LOWER($${queryParams.length + 1}) 
-               OR LOWER(c.name_eu) LIKE LOWER($${queryParams.length + 1}) 
-               OR LOWER(t.name_ru) LIKE LOWER($${queryParams.length + 1}) 
-               OR LOWER(t.name_eu) LIKE LOWER($${queryParams.length + 1})
-            `);
-            queryParams.push(searchQuery);
+         // Если есть поисковые термины
+         if (searchTerms.length > 0) {
+            // Создаем массив для хранения всех условий поиска
+            const searchConditions = [];
+
+            // Для каждого слова в поиске создаем отдельные условия
+            searchTerms.forEach(term => {
+               // Проверяем, является ли термин числом (возможно возраст)
+               if (!isNaN(term) && term.length < 4) { // Вероятно возраст, если меньше 4 цифр
+                  const age = parseInt(term);
+                  searchConditions.push(`DATE_PART('year', AGE(a.date_of_birth::DATE)) = $${queryParams.length + 1}`);
+                  queryParams.push(age);
+               } else {
+                  const searchLike = `%${term.toLowerCase()}%`;
+                  // Для текстового поиска используем OR между различными полями
+                  searchConditions.push(`(
+                     LOWER(a.name) LIKE LOWER($${queryParams.length + 1}) 
+                     OR LOWER(c.name_ru) LIKE LOWER($${queryParams.length + 1}) 
+                     OR LOWER(c.name_eu) LIKE LOWER($${queryParams.length + 1}) 
+                     OR LOWER(t.name_ru) LIKE LOWER($${queryParams.length + 1}) 
+                     OR LOWER(t.name_eu) LIKE LOWER($${queryParams.length + 1})
+                  )`);
+                  queryParams.push(searchLike);
+               }
+            });
+
+            // Объединяем все условия поиска с оператором AND - запись должна соответствовать ВСЕМ словам
+            if (searchConditions.length > 0) {
+               conditions.push(`(${searchConditions.join(' AND ')})`);
+            }
          }
       }
 
@@ -667,7 +781,6 @@ app.post('/add-view', async (req, res) => {
    }
 });
 
-// Финальный эндпоинт для получения городов - аккаунты с NULL датой НЕ учитываются
 app.get('/cities', authMiddleware, async (req, res) => {
    try {
       // Используем текущую дату и время для корректного сравнения
@@ -898,23 +1011,21 @@ app.get("/get-role", async (req, res) => {
 app.get('/comments', async (req, res) => {
    try {
       const { user_id } = req.query;
-
       if (!user_id) {
          return res.status(400).json({ error: 'user_id is required' });
       }
-
       const result = await pool.query(`
-         SELECT 
-            c.id, 
-            c.parent_id, 
-            c.account_id, 
-            c.user_id, 
-            c.text, 
-            c.date_comment, 
-            c.time_comment, 
-            u.login AS author_nickname, 
-            a.name AS account_name, 
-            quoted_u.login AS quoted_author_nickname, 
+         SELECT
+            c.id,
+            c.parent_id,
+            c.account_id,
+            c.user_id,
+            c.text,
+            TO_CHAR(c.date_comment, 'YYYY-MM-DD') as date_comment,
+            c.time_comment,
+            u.login AS author_nickname,
+            a.name AS account_name,
+            quoted_u.login AS quoted_author_nickname,
             parent_comment.text AS quoted_comment_text
          FROM comments c
          LEFT JOIN users u ON c.user_id = u.id
@@ -922,10 +1033,9 @@ app.get('/comments', async (req, res) => {
          LEFT JOIN comments parent_comment ON c.parent_id = parent_comment.id
          LEFT JOIN users quoted_u ON parent_comment.user_id = quoted_u.id
          WHERE c.user_id = $1
+         ORDER BY c.date_comment DESC, c.time_comment DESC
       `, [user_id]);
-
       res.json(result.rows);
-
    } catch (err) {
       console.error('Error:', err);
       res.status(500).json({ error: 'Server error', message: err.message });
@@ -933,61 +1043,143 @@ app.get('/comments', async (req, res) => {
 });
 
 app.post("/add-comment", async (req, res) => {
-   const { account_id, user_id, text, parent_id = null } = req.body;
+   const { account_id, user_id, text, parent_id } = req.body;
+
+   // Валидация обязательных полей
+   if (!account_id || !user_id || !text) {
+      return res.status(400).json({
+         success: false,
+         message: "Missing required fields: account_id, user_id and text are required"
+      });
+   }
+
    // Store date and time in UTC format
    const now = new Date();
    const date_comment = now.toISOString().split('T')[0]; // Get date in YYYY-MM-DD format (UTC)
    const time_comment = now.toISOString().split('T')[1].slice(0, 8); // Get time in HH:MM:SS format (UTC)
 
    try {
-      // Insert the new comment into the comments table
+      // Проверка существования пользователя и аккаунта
+      const userExists = await pool.query(
+         "SELECT id FROM users WHERE id = $1",
+         [user_id]
+      );
+
+      if (userExists.rows.length === 0) {
+         return res.status(404).json({
+            success: false,
+            message: "User not found"
+         });
+      }
+
+      const accountExists = await pool.query(
+         "SELECT id FROM accounts WHERE id = $1",
+         [account_id]
+      );
+
+      if (accountExists.rows.length === 0) {
+         return res.status(404).json({
+            success: false,
+            message: "Account not found"
+         });
+      }
+
+      // Если указан parent_id, проверяем существование родительского комментария
+      if (parent_id !== null) {
+         const parentCommentExists = await pool.query(
+            "SELECT id FROM comments WHERE id = $1",
+            [parent_id]
+         );
+
+         if (parentCommentExists.rows.length === 0) {
+            return res.status(404).json({
+               success: false,
+               message: "Parent comment not found"
+            });
+         }
+      }
+
       const result = await pool.query(
          "INSERT INTO comments (account_id, user_id, text, parent_id, date_comment, time_comment) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
          [account_id, user_id, text, parent_id, date_comment, time_comment]
       );
+
+      // Получаем nickname пользователя для ответа
+      const userInfo = await pool.query(
+         "SELECT login FROM users WHERE id = $1",
+         [user_id]
+      );
+
+      const commentWithNickname = {
+         ...result.rows[0],
+         author_nickname: userInfo.rows[0]?.login
+      };
+
       res.status(201).json({
          success: true,
-         comment: result.rows[0], // Return the added comment
+         comment: commentWithNickname, // Return the added comment with author nickname
       });
    } catch (error) {
       console.error("Error adding comment:", error);
       res.status(500).json({
          success: false,
-         message: "Error adding comment",
+         message: "Error adding comment: " + error.message,
       });
    }
 });
 
 app.put("/update-comment", async (req, res) => {
-   // Изменяем деструктуризацию, чтобы соответствовать клиентскому коду
    const { comment_id, text } = req.body;
+
+   // Валидация обязательных полей
+   if (!comment_id || !text) {
+      return res.status(400).json({
+         success: false,
+         message: "Missing required fields: comment_id and text are required"
+      });
+   }
+
    try {
       // Проверяем, существует ли комментарий с таким id
       const existingComment = await pool.query(
          "SELECT * FROM comments WHERE id = $1",
          [comment_id]
       );
+
       if (existingComment.rows.length === 0) {
          return res.status(404).json({
             success: false,
             message: "Комментарий не найден",
          });
       }
+
       // Обновляем комментарий
       const updatedComment = await pool.query(
          "UPDATE comments SET text = $1 WHERE id = $2 RETURNING *",
          [text, comment_id]
       );
+
+      // Получаем nickname пользователя для ответа
+      const userInfo = await pool.query(
+         "SELECT login FROM users WHERE id = $1",
+         [updatedComment.rows[0].user_id]
+      );
+
+      const commentWithNickname = {
+         ...updatedComment.rows[0],
+         author_nickname: userInfo.rows[0]?.login
+      };
+
       res.status(200).json({
          success: true,
          message: "Комментарий обновлен",
-         comment: updatedComment.rows[0],
+         comment: commentWithNickname,
       });
    } catch (error) {
       console.error("Error updating comment:", error);
       res.status(500).json({
          success: false,
-         message: "Ошибка при обновлении комментария",
+         message: "Ошибка при обновлении комментария: " + error.message,
       });
    }
 });
@@ -1976,9 +2168,7 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
          // === Определение даты рождения ===
          let dateOfBirth = null;
          if (account.dr) {
-            let currentYear = new Date().getFullYear();
-            let birthYear = currentYear - parseInt(account.dr, 10);
-            dateOfBirth = `${birthYear}-01-01`;
+            dateOfBirth = parseDateOfBirth(account.dr);
          }
 
          // Проверяем существует ли уже аккаунт с таким identificator
@@ -2160,7 +2350,8 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
             tik: "tik",
             of: "of",
             tel: "tel",
-            skype: "skype"
+            skype: "skype",
+            vk: "vk"  // Добавьте эту строку!
          };
 
          for (const [key, socialIdentificator] of Object.entries(socialTypes)) {
@@ -2278,12 +2469,43 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
 
          console.log("Занятые номера файлов:", usedNumbers);
 
-         // Функция для поиска первого свободного номера
-         const getNextNumber = (usedNumbers, start) => {
-            let number = start;
-            while (usedNumbers.includes(number)) number++;
-            usedNumbers.push(number); // Добавляем в занятые, чтобы избежать дублирования
-            return number;
+         // ИЗМЕНЕНИЕ: Улучшенная функция для поиска свободного номера
+         const getNextNumber = (usedNumbers, startRange, endRange) => {
+            // Сортируем номера для удобства работы
+            const sortedUsed = [...usedNumbers].sort((a, b) => a - b);
+
+            // Для изображений (от 1 до 1000)
+            if (startRange === 1) {
+               // Найти максимальный номер в диапазоне
+               const maxInRange = sortedUsed
+                  .filter(num => num >= startRange && num < endRange)
+                  .pop() || 0;
+
+               // Если есть место в диапазоне, используем следующий номер
+               if (maxInRange < endRange - 1) {
+                  return maxInRange + 1;
+               }
+
+               // Если весь диапазон заполнен, ищем первую "дырку"
+               for (let i = startRange; i < endRange; i++) {
+                  if (!sortedUsed.includes(i)) {
+                     return i;
+                  }
+               }
+
+               // Если дырок нет, используем следующий доступный номер
+               return endRange;
+            }
+            // Для видео (от 1001 и выше)
+            else {
+               // Найти максимальный номер
+               const maxNumber = sortedUsed
+                  .filter(num => num >= startRange)
+                  .pop() || startRange - 1;
+
+               // Возвращаем следующий по порядку
+               return maxNumber + 1;
+            }
          };
 
          // Загружаем новые файлы на SFTP
@@ -2293,9 +2515,13 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
             const uploadPromises = req.files.map(async (file) => {
                try {
                   let ext = path.extname(file.originalname).toLowerCase();
+
+                  // ИЗМЕНЕНИЕ: Используем улучшенную логику нумерации
                   let newNumber = /\.(mp4|mov|avi|mkv)$/i.test(ext)
-                     ? getNextNumber(usedNumbers, 200)  // Видео от 200 и выше
-                     : getNextNumber(usedNumbers, 1);   // Картинки от 1 до 199
+                     ? getNextNumber(usedNumbers, 1001, Infinity)  // Видео от 1001 и выше
+                     : getNextNumber(usedNumbers, 1, 1001);        // Картинки от 1 до 1000
+
+                  usedNumbers.push(newNumber); // Добавляем в занятые сразу
 
                   let newFileName = `${newNumber}${ext}`;
                   console.log(`Загрузка файла ${file.originalname} как ${newFileName}...`);
