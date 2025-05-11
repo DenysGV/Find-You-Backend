@@ -2421,6 +2421,14 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
    try {
       const id = req.query.id;
       if (!id) {
+         // Удаляем временные файлы, если id отсутствует
+         if (req.files && Array.isArray(req.files)) {
+            for (const file of req.files) {
+               if (fs.existsSync(file.path)) {
+                  fs.unlinkSync(file.path);
+               }
+            }
+         }
          return res.status(400).json({ success: false, message: "Отсутствует id" });
       }
 
@@ -2431,9 +2439,17 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
          console.log(`Директория проверена/создана на SFTP: ${id}`);
       } catch (dirError) {
          console.error(`Ошибка при создании директории на SFTP для ${id}:`, dirError);
+         // Удаляем временные файлы при ошибке SFTP
+         if (req.files && Array.isArray(req.files)) {
+            for (const file of req.files) {
+               if (fs.existsSync(file.path)) {
+                  fs.unlinkSync(file.path);
+               }
+            }
+         }
          return res.status(500).json({
             success: false,
-            message: "Ошибка при работе с SFTP",
+            message: "Ошибка при работе с SFTP (создание директории)",
             error: dirError.message
          });
       }
@@ -2442,11 +2458,15 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
       let incomingLinks = [];
       if (req.body.links) {
          try {
-            incomingLinks = JSON.parse(req.body.links);
-            incomingLinks = incomingLinks.filter(item => typeof item === "string");
+            // Убеждаемся, что req.body.links является строкой перед парсингом
+            const linksString = typeof req.body.links === 'string' ? req.body.links : JSON.stringify(req.body.links);
+            incomingLinks = JSON.parse(linksString);
+            incomingLinks = incomingLinks.filter(item => typeof item === "string" && item.trim() !== ''); // Добавлено условие item.trim() !== ''
             console.log(`Получено ${incomingLinks.length} ссылок`);
          } catch (error) {
-            console.error("Ошибка парсинга JSON:", error);
+            console.error("Ошибка парсинга JSON или обработки ссылок:", error);
+            // Устанавливаем пустой массив при ошибке, чтобы продолжить выполнение
+            incomingLinks = [];
          }
       }
 
@@ -2459,157 +2479,242 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
          let existingFiles = await listFiles(id);
          console.log(`Существующие файлы в директории ${id}:`, existingFiles);
 
-         // Получаем все занятые номера
+         // Улучшенный парсинг номеров файлов
+         const extractFileNumber = (fileName) => {
+            const fileNameWithoutExt = fileName.split('.')[0];
+            const fileNumber = parseInt(fileNameWithoutExt);
+            return isNaN(fileNumber) ? -1 : fileNumber;
+         };
+
+         // Получаем все занятые номера из существующих файлов
          let usedNumbers = existingFiles
-            .map(file => {
-               const fileNumber = parseInt(file.split(".")[0]);
-               return isNaN(fileNumber) ? -1 : fileNumber;
-            })
+            .map(file => extractFileNumber(file))
             .filter(num => num >= 0);
 
-         console.log("Занятые номера файлов:", usedNumbers);
+         console.log("Исходные занятые номера файлов:", usedNumbers);
 
-         // ИЗМЕНЕНИЕ: Улучшенная функция для поиска свободного номера
-         const getNextNumber = (usedNumbers, startRange, endRange) => {
-            // Сортируем номера для удобства работы
-            const sortedUsed = [...usedNumbers].sort((a, b) => a - b);
+         // Улучшенная функция для поиска свободного номера
+         const getNextNumber = (currentUsedNumbers, startRange, endRange = Infinity) => {
+            // Сортируем номера для удобства работы и поиска дыр
+            const sortedUsed = [...currentUsedNumbers].sort((a, b) => a - b);
 
-            // Для изображений (от 1 до 1000)
-            if (startRange === 1) {
-               // Найти максимальный номер в диапазоне
+            // Если диапазон ограничен (для изображений, 1-1000)
+            if (endRange !== Infinity) {
+               // Сначала используем следующий после максимального в диапазоне
                const maxInRange = sortedUsed
-                  .filter(num => num >= startRange && num < endRange)
-                  .pop() || 0;
+                  .filter(num => num >= startRange && num < endRange) // Ищем в заданном диапазоне
+                  .pop() || startRange - 1; // Если нет чисел в диапазоне, начинаем с (startRange - 1)
 
-               // Если есть место в диапазоне, используем следующий номер
                if (maxInRange < endRange - 1) {
                   return maxInRange + 1;
                }
 
-               // Если весь диапазон заполнен, ищем первую "дырку"
+               // Если достигли предела диапазона по максимуму, ищем "дыры" сначала
                for (let i = startRange; i < endRange; i++) {
                   if (!sortedUsed.includes(i)) {
                      return i;
                   }
                }
 
-               // Если дырок нет, используем следующий доступный номер
-               return endRange;
+               // Если совсем нет места в диапазоне до endRange, используем endRange (что может быть ошибкой, но соответствует текущей логике)
+               console.warn(`Внимание: Диапазон номеров ${startRange}-${endRange - 1} для изображений заполнен. Используется номер ${endRange}.`);
+               return endRange; // Или можно выбросить ошибку
             }
-            // Для видео (от 1001 и выше)
+            // Для видео (от 1001 и выше, бесконечный диапазон)
             else {
-               // Найти максимальный номер
+               // Найти максимальный номер среди всех занятых номеров, которые >= startRange
                const maxNumber = sortedUsed
                   .filter(num => num >= startRange)
-                  .pop() || startRange - 1;
+                  .pop() || startRange - 1; // Если нет номеров >= startRange, начинаем с (startRange - 1)
 
                // Возвращаем следующий по порядку
                return maxNumber + 1;
             }
          };
 
-         // Загружаем новые файлы на SFTP
-         let uploadedFiles = [];
 
+         // --- ИЗМЕНЕНИЯ НАЧИНАЮТСЯ ЗДЕСЬ ---
+
+         let filesToUploadWithNames = [];
+         let currentUsedNumbers = [...usedNumbers]; // Копируем для мутации в цикле
+
+         // 1. Синхронно присваиваем номера всем новым файлам
          if (req.files && req.files.length > 0) {
-            const uploadPromises = req.files.map(async (file) => {
+            console.log("Присвоение номеров новым файлам...");
+            for (const file of req.files) {
+               let ext = path.extname(file.originalname).toLowerCase();
+               let newNumber;
+
+               // Определяем диапазон и получаем следующий номер
+               if (/\.(mp4|mov|avi|mkv)$/i.test(ext)) {
+                  newNumber = getNextNumber(currentUsedNumbers, 1001, Infinity); // Видео от 1001 и выше
+               } else {
+                  newNumber = getNextNumber(currentUsedNumbers, 1, 1001); // Картинки от 1 до 1000 (endRange не включает последнее число)
+               }
+
+               // Добавляем только что присвоенный номер к списку занятых для последующих итераций цикла
+               currentUsedNumbers.push(newNumber);
+               currentUsedNumbers.sort((a, b) => a - b); // Сортируем для корректной работы getNextNumber в следующей итерации
+
+               let newFileName = `${newNumber}${ext}`;
+               console.log(`Файлу ${file.originalname} присвоен номер ${newNumber}, имя: ${newFileName}`);
+
+               filesToUploadWithNames.push({
+                  file: file,
+                  newFileName: newFileName,
+                  publicUrl: getPublicUrl(path.posix.join(id, newFileName)) // Формируем предполагаемую публичную ссылку заранее
+               });
+            }
+            console.log(`Новым файлам присвоены номера. Актуальные занятые номера:`, currentUsedNumbers);
+         } else {
+            console.log("Нет файлов для загрузки.");
+         }
+
+         // 2. Асинхронно загружаем файлы с присвоенными именами, собирая результаты в правильном порядке
+         let uploadedFiles = []; // Этот массив будет заполнен в порядке исходных файлов
+         if (filesToUploadWithNames.length > 0) {
+            console.log("Загрузка новых файлов на SFTP...");
+            const uploadPromises = filesToUploadWithNames.map(async (fileInfo) => {
                try {
-                  let ext = path.extname(file.originalname).toLowerCase();
-
-                  // ИЗМЕНЕНИЕ: Используем улучшенную логику нумерации
-                  let newNumber = /\.(mp4|mov|avi|mkv)$/i.test(ext)
-                     ? getNextNumber(usedNumbers, 1001, Infinity)  // Видео от 1001 и выше
-                     : getNextNumber(usedNumbers, 1, 1001);        // Картинки от 1 до 1000
-
-                  usedNumbers.push(newNumber); // Добавляем в занятые сразу
-
-                  let newFileName = `${newNumber}${ext}`;
-                  console.log(`Загрузка файла ${file.originalname} как ${newFileName}...`);
-
-                  // Загружаем файл на SFTP
-                  const remotePath = await uploadFile(file.path, id, newFileName);
-                  console.log(`Файл успешно загружен на SFTP: ${remotePath}`);
-
-                  // Создаем публичную ссылку на файл
-                  const publicUrl = getPublicUrl(remotePath);
-                  uploadedFiles.push(publicUrl);
+                  console.log(`Загрузка файла ${fileInfo.file.originalname} как ${fileInfo.newFileName}...`);
+                  // Загружаем файл на SFTP, используя новое имя
+                  await uploadFile(fileInfo.file.path, id, fileInfo.newFileName);
+                  console.log(`Файл успешно загружен на SFTP: ${path.posix.join(id, fileInfo.newFileName)}`);
 
                   // Удаляем временный файл
-                  if (fs.existsSync(file.path)) {
-                     fs.unlinkSync(file.path);
-                     console.log(`Временный файл ${file.path} удален`);
+                  if (fs.existsSync(fileInfo.file.path)) {
+                     fs.unlinkSync(fileInfo.file.path);
+                     console.log(`Временный файл ${fileInfo.file.path} удален`);
                   }
 
-                  return publicUrl;
+                  return fileInfo.publicUrl; // Возвращаем публичную ссылку
                } catch (uploadError) {
-                  console.error(`Ошибка при загрузке файла ${file.originalname}:`, uploadError);
+                  console.error(`Ошибка при загрузке файла ${fileInfo.file.originalname}:`, uploadError);
                   // Удаляем временный файл даже при ошибке
-                  if (fs.existsSync(file.path)) {
-                     fs.unlinkSync(file.path);
-                     console.log(`Временный файл ${file.path} удален после ошибки`);
+                  if (fs.existsSync(fileInfo.file.path)) {
+                     fs.unlinkSync(fileInfo.file.path);
+                     console.log(`Временный файл ${fileInfo.file.path} удален после ошибки`);
                   }
+                  // Важно: при ошибке загрузки файла, мы должны как-то это обработать.
+                  // Сейчас ошибка выбрасывается, и Promise.all упадет.
+                  // Если нужно продолжить при ошибке одного файла, нужно обернуть
+                  // этот промис так, чтобы он всегда разрешался (например, возвращать null или ошибку объект)
+                  // await Promise.allSettled(uploadPromises); и обрабатывать результаты.
+                  // Для простоты пока оставляем выброс ошибки, как было.
                   throw uploadError;
                }
             });
 
-            // Ждем завершения всех загрузок
-            await Promise.all(uploadPromises);
-            console.log(`Загружено ${uploadedFiles.length} файлов`);
+            // Ждем завершения всех загрузок. Результат Promise.all будет массивом в том же порядке, что и uploadPromises
+            uploadedFiles = await Promise.all(uploadPromises);
+            console.log(`Загружено ${uploadedFiles.length} файлов. Порядок загрузки соответствует порядку в запросе.`);
+
          } else {
-            console.log("Нет файлов для загрузки");
+            console.log("Нет файлов для загрузки.");
          }
 
-         // Получаем обновленный список файлов
-         console.log("Получение обновленного списка файлов...");
+         // --- ИЗМЕНЕНИЯ ЗАКОНЧИЛИСЬ ЗДЕСЬ ---
+
+
+         // Получаем обновленный список файлов с SFTP
+         console.log("Получение обновленного списка файлов с SFTP...");
          existingFiles = await listFiles(id);
 
-         // Получаем имена файлов из ссылок
-         let incomingFileNames = incomingLinks.map(link => path.basename(link));
-         let uploadedFileNames = uploadedFiles.map(link => path.basename(link));
+         // Получаем имена файлов из ссылок (только имена файлов без пути) и из только что загруженных
+         let incomingFileNames = incomingLinks.map(link => {
+            try {
+               const url = new URL(link);
+               return path.basename(url.pathname);
+            } catch (e) {
+               console.error(`Неверный формат ссылки: ${link}`, e);
+               return null; // Игнорируем некорректные ссылки
+            }
+         }).filter(name => name !== null); // Отфильтровываем некорректные имена
+
+         // uploadedFiles теперь в правильном порядке, но нам нужны только имена для логики удаления
+         let uploadedFileNames = uploadedFiles.map(link => {
+            try {
+               const url = new URL(link);
+               return path.basename(url.pathname);
+            } catch (e) {
+               console.error(`Неверный формат ссылки загруженного файла: ${link}`, e);
+               return null; // Этого по идее не должно происходить, т.к. ссылки мы сами генерируем
+            }
+         }).filter(name => name !== null);
+
 
          console.log("Сохраняемые файлы (из ссылок):", incomingFileNames);
-         console.log("Загруженные файлы:", uploadedFileNames);
+         console.log("Загруженные файлы (имена):", uploadedFileNames); // Этот лог теперь будет в порядке загрузки
 
-         // Удаляем файлы, которых нет в incomingFileNames и uploadedFileNames
-         if (incomingFileNames.length > 0 || uploadedFileNames.length > 0) {
-            const filesToDelete = existingFiles.filter(file =>
-               !incomingFileNames.includes(file) && !uploadedFileNames.includes(file));
+         // Определяем файлы для удаления: те, что существуют на SFTP, но НЕ входят в список сохраняемых или только что загруженных
+         const filesToKeepNames = new Set([...incomingFileNames, ...uploadedFileNames]); // Используем Set для быстрого поиска
+         const filesToDelete = existingFiles.filter(file => !filesToKeepNames.has(file));
 
-            console.log("Файлы для удаления:", filesToDelete);
+         console.log("Файлы для удаления с SFTP:", filesToDelete);
 
+         if (filesToDelete.length > 0) {
+            console.log(`Начало удаления ${filesToDelete.length} файлов...`);
             const deletePromises = filesToDelete.map(async (file) => {
                try {
                   await deleteFile(`${id}/${file}`);
                   console.log(`Файл удален с SFTP: ${id}/${file}`);
                } catch (deleteError) {
                   console.error(`Ошибка при удалении файла ${file}:`, deleteError);
+                  // Продолжаем удаление других файлов даже при ошибке одного
                }
             });
 
-            // Ждем завершения всех удалений
+            // Ждем завершения всех удалений. Если нужно, можно использовать Promise.allSettled
             await Promise.all(deletePromises);
+            console.log("Удаление файлов завершено.");
          } else {
-            console.log("Нет файлов для удаления (сохраняем все существующие)");
+            console.log("Нет файлов для удаления с SFTP");
          }
 
-         // Получаем финальный список файлов и формируем публичные ссылки
-         console.log("Получение финального списка файлов...");
+         // Получаем финальный список файлов с SFTP и формируем публичные ссылки
+         console.log("Получение финального списка файлов с SFTP...");
          const updatedFiles = await listFiles(id);
-         const updatedFileUrls = updatedFiles
-            .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.mp4'))
-            .map(file => getPublicUrl(`/${id}/${file}`));
+
+         // Создаем массив объектов с именем файла и его номером для сортировки
+         const fileObjects = updatedFiles
+            .filter(file => {
+               const ext = path.extname(file).toLowerCase();
+               return ext === '.jpg' || ext === '.png' || ext === '.jpeg' || ext === '.gif' ||
+                  ext === '.mp4' || ext === '.mov' || ext === '.avi' || ext === '.mkv';
+            })
+            .map(file => ({
+               name: file,
+               number: extractFileNumber(file)
+            }))
+            .filter(fileObj => fileObj.number >= 0); // Отфильтровываем файлы, у которых не удалось извлечь номер
+
+         // Сортируем файлы по их номерам (это обеспечивает нужный тебе порядок 1, 2, 3, 4, 5...)
+         fileObjects.sort((a, b) => a.number - b.number);
+
+         // Преобразуем обратно в массив URL-адресов
+         const updatedFileUrls = fileObjects.map(fileObj =>
+            getPublicUrl(path.posix.join(id, fileObj.name))
+         );
 
          console.log(`Финальный список файлов (${updatedFileUrls.length}):`, updatedFileUrls);
 
          res.json({
             success: true,
             message: "Операция выполнена успешно",
-            files: updatedFileUrls,
-            uploaded: uploadedFiles.length,
-            deleted: existingFiles.length - updatedFiles.length + uploadedFiles.length
+            files: updatedFileUrls, // Этот список отсортирован по номеру
+            uploaded: uploadedFileNames.length, // Количество успешно загруженных (имена в порядке загрузки)
+            deleted: filesToDelete.length
          });
       } catch (sftpError) {
-         console.error(`Ошибка при работе с SFTP:`, sftpError);
+         console.error(`Ошибка при работе с SFTP (основной блок):`, sftpError);
+         // Удаляем временные файлы при ошибке SFTP
+         if (req.files && Array.isArray(req.files)) {
+            for (const file of req.files) {
+               if (fs.existsSync(file.path)) {
+                  fs.unlinkSync(file.path);
+               }
+            }
+         }
          return res.status(500).json({
             success: false,
             message: "Ошибка при работе с SFTP",
@@ -2617,9 +2722,9 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
          });
       }
    } catch (error) {
-      console.error("Общая ошибка:", error);
+      console.error("Общая ошибка в route handler:", error);
 
-      // Удаляем временные файлы при ошибке
+      // Удаляем временные файлы при общей ошибке
       if (req.files && Array.isArray(req.files)) {
          for (const file of req.files) {
             if (fs.existsSync(file.path)) {
