@@ -1436,27 +1436,24 @@ app.post('/add-order', async (req, res) => {
          return res.status(400).json({ error: 'user_id и text обязательны' });
       }
 
-      // Создаем дату в текущем времени (UTC)
+      // Используем текущую дату в UTC формате, как в примерах add-comment и send-messages
+      // Не делаем преобразование в московское время
       const now = new Date();
 
-      // Преобразуем в московское время (UTC+3)
-      // Создаем новый объект Date с учетом смещения (3 часа)
-      const moscowTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+      // Версия 1: используем toISOString + replace для получения формата 'YYYY-MM-DD HH:MM:SS'
+      // Этот формат совместим с типом TIMESTAMP в PostgreSQL
+      const timestamp = now.toISOString().slice(0, 19).replace('T', ' ');
 
-      // Форматируем дату в московском времени
-      const formattedDate = moscowTime.toISOString().slice(0, 19).replace('T', ' ');
-
-      // Вставляем в базу данных с явно заданной датой
+      // Вставляем в базу данных с явно заданной датой в UTC
       const query = `
          INSERT INTO orders (user_id, created_at, text, status, type)
          VALUES ($1, $2, $3, 1, $4)
          RETURNING *;
       `;
 
-      const { rows } = await pool.query(query, [user_id, formattedDate, text, type]);
+      const { rows } = await pool.query(query, [user_id, timestamp, text, type || null]);
 
-      // Возвращаем созданный заказ
-      // Дата уже в нужном формате, поэтому дополнительное форматирование не требуется
+      // Возвращаем созданный заказ без дополнительного форматирования даты
       res.status(201).json(rows[0]);
    } catch (err) {
       console.error('Ошибка:', err);
