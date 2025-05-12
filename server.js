@@ -1436,22 +1436,20 @@ app.post('/add-order', async (req, res) => {
          return res.status(400).json({ error: 'user_id и text обязательны' });
       }
 
-      // Используем JavaScript для создания даты, как в update-account-date
-      const now = new Date().toISOString();
+      // Не нужно создавать дату в JavaScript - используем CURRENT_TIMESTAMP в SQL
+      // const now = new Date().toISOString(); <-- удаляем эту строку
 
       const query = `
-         INSERT INTO orders (user_id, created_at, text, status, type) 
-         VALUES ($1, CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Moscow', $2, 1, $3) 
+         INSERT INTO orders (user_id, created_at, text, status, type)
+         VALUES ($1, CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Moscow', $2, $3)
          RETURNING *;
       `;
-
-      const { rows } = await pool.query(query, [user_id, now, text, type]);
+      const { rows } = await pool.query(query, [user_id, text, type]); // Исправлен порядок параметров
 
       // Форматируем дату в ответе
       if (rows[0] && rows[0].created_at) {
          rows[0].created_at = dateUtils.formatDateFromDB(rows[0].created_at);
       }
-
       res.status(201).json(rows[0]);
    } catch (err) {
       console.error('Ошибка:', err);
