@@ -337,6 +337,19 @@ function parseDateOfBirth(drValue) {
    return null;
 }
 
+const dateUtils = {
+   // Получение текущей даты в нужном часовом поясе (по умолчанию 'Europe/Moscow')
+   getCurrentTimestamp: (timezone = 'Europe/Moscow') => {
+      return new Date().toLocaleString('en-US', { timeZone: timezone });
+   },
+
+   // Конвертация даты из базы в нужный часовой пояс
+   formatDateFromDB: (dateStr, timezone = 'Europe/Moscow') => {
+      if (!dateStr) return null;
+      return new Date(dateStr).toLocaleString('en-US', { timeZone: timezone });
+   }
+};
+
 app.get('/accounts', async (req, res) => {
    try {
       let { search, city_id, tag_id, date_range, page = 1, limit = 40, admin_mode = 'false', sort_by_rating = 'false' } = req.query;
@@ -1423,13 +1436,20 @@ app.post('/add-order', async (req, res) => {
          return res.status(400).json({ error: 'user_id и text обязательны' });
       }
 
+      // Используем явную спецификацию часового пояса
       const query = `
-         INSERT INTO orders (user_id, created_at, text, status, type) 
-         VALUES ($1, NOW(), $2, 1, $3) 
-         RETURNING *;
+      INSERT INTO orders (user_id, created_at, text, status, type) 
+      VALUES ($1, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Moscow'), $2, 1, $3) 
+      RETURNING *;
       `;
 
       const { rows } = await pool.query(query, [user_id, text, type]);
+
+      // Форматируем дату в ответе
+      if (rows[0] && rows[0].created_at) {
+         rows[0].created_at = dateUtils.formatDateFromDB(rows[0].created_at);
+      }
+
       res.status(201).json(rows[0]);
    } catch (err) {
       console.error('Ошибка:', err);
@@ -2915,21 +2935,30 @@ app.post("/update-photo", uploadPhoto.single("photo"), async (req, res) => {
 
 app.post("/update-account-date", async (req, res) => {
    try {
-      const { id, new_date_of_create } = req.body; // Дата и ID аккаунта
+      const { id, new_date_of_create } = req.body;
 
-      // Важное изменение здесь: передаем null напрямую в запрос
+      // Преобразование даты с учетом часового пояса
+      let formattedDate = new_date_of_create;
+      if (new_date_of_create) {
+         // Если передана дата, убедимся, что она обрабатывается правильно
+         formattedDate = new Date(new_date_of_create).toISOString();
+      }
+
       const result = await pool.query(
          `UPDATE accounts
-          SET date_of_create = $1
-          WHERE id = $2
-          RETURNING *`,  // Возвращаем обновленную строку для проверки
-         [new_date_of_create, id]
+       SET date_of_create = $1
+       WHERE id = $2
+       RETURNING *`,
+         [formattedDate, id]
       );
 
-      // Если аккаунт найден и обновлен
+      // Форматируем дату в ответе
+      if (result.rows.length > 0 && result.rows[0].date_of_create) {
+         result.rows[0].date_of_create = dateUtils.formatDateFromDB(result.rows[0].date_of_create);
+      }
+
       if (result.rows.length > 0) {
-         console.log("Обновленная запись:", result.rows[0]);
-         res.json(result.rows[0]);  // Возвращаем обновленный аккаунт
+         res.json(result.rows[0]);
       } else {
          res.status(404).json({ error: "Аккаунт не найден" });
       }
