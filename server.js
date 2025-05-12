@@ -1436,14 +1436,16 @@ app.post('/add-order', async (req, res) => {
          return res.status(400).json({ error: 'user_id и text обязательны' });
       }
 
-      // Используем явную спецификацию часового пояса
+      // Используем JavaScript для создания даты, как в update-account-date
+      const now = new Date().toISOString();
+
       const query = `
-      INSERT INTO orders (user_id, created_at, text, status, type) 
-      VALUES ($1, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Moscow'), $2, 1, $3) 
-      RETURNING *;
+         INSERT INTO orders (user_id, created_at, text, status, type) 
+         VALUES ($1, $2, $3, 1, $4) 
+         RETURNING *;
       `;
 
-      const { rows } = await pool.query(query, [user_id, text, type]);
+      const { rows } = await pool.query(query, [user_id, now, text, type]);
 
       // Форматируем дату в ответе
       if (rows[0] && rows[0].created_at) {
