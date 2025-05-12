@@ -1441,7 +1441,7 @@ app.post('/add-order', async (req, res) => {
 
       const query = `
          INSERT INTO orders (user_id, created_at, text, status, type)
-         VALUES ($1, CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Moscow', $2, $3)
+         VALUES ($1, CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Moscow', $2, 1, $3)
          RETURNING *;
       `;
       const { rows } = await pool.query(query, [user_id, text, type]); // Исправлен порядок параметров
