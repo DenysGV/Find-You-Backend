@@ -1431,20 +1431,30 @@ app.post('/set-rate', (req, res) => {
 
 app.post('/add-order', async (req, res) => {
    try {
-      const { user_id, text, type } = req.body;
+      const { user_id, text, type, created_at } = req.body;
+
       if (!user_id || !text) {
          return res.status(400).json({ error: 'user_id и text обязательны' });
       }
 
-      // Используем текущую дату в UTC формате, как в примерах add-comment и send-messages
-      // Не делаем преобразование в московское время
-      const now = new Date();
+      let timestamp;
 
-      // Версия 1: используем toISOString + replace для получения формата 'YYYY-MM-DD HH:MM:SS'
-      // Этот формат совместим с типом TIMESTAMP в PostgreSQL
-      const timestamp = now.toISOString().slice(0, 19).replace('T', ' ');
+      // Если передана конкретная дата, используем её
+      if (created_at) {
+         // Преобразуем дату из формата DD.MM.YYYY HH:MM в формат для PostgreSQL
+         // Разбиваем строку на компоненты
+         const [datePart, timePart] = created_at.split(' ');
+         const [day, month, year] = datePart.split('.');
 
-      // Вставляем в базу данных с явно заданной датой в UTC
+         // Формируем строку в формате YYYY-MM-DD HH:MM:SS
+         timestamp = `${year}-${month}-${day} ${timePart}:00`;
+      } else {
+         // Используем текущую дату в UTC формате
+         const now = new Date();
+         timestamp = now.toISOString().slice(0, 19).replace('T', ' ');
+      }
+
+      // Вставляем в базу данных
       const query = `
          INSERT INTO orders (user_id, created_at, text, status, type)
          VALUES ($1, $2, $3, 1, $4)
@@ -1453,7 +1463,12 @@ app.post('/add-order', async (req, res) => {
 
       const { rows } = await pool.query(query, [user_id, timestamp, text, type || null]);
 
-      // Возвращаем созданный заказ без дополнительного форматирования даты
+      // Форматируем дату для вывода в локальном формате
+      if (rows[0] && rows[0].created_at) {
+         const createdDate = new Date(rows[0].created_at);
+         rows[0].formatted_date = `${String(createdDate.getDate()).padStart(2, '0')}.${String(createdDate.getMonth() + 1).padStart(2, '0')}.${createdDate.getFullYear()} ${String(createdDate.getHours()).padStart(2, '0')}:${String(createdDate.getMinutes()).padStart(2, '0')}`;
+      }
+
       res.status(201).json(rows[0]);
    } catch (err) {
       console.error('Ошибка:', err);
@@ -1487,7 +1502,9 @@ app.post('/check-rate', (req, res) => {
 app.get('/get-orders', async (req, res) => {
    try {
       const { user_id, start_date, end_date, type } = req.query;
-      let query = `SELECT * FROM orders`;
+      let query = `SELECT *, 
+                  TO_CHAR(created_at, 'DD.MM.YYYY HH24:MI') as formatted_date 
+                  FROM orders`;
       let queryParams = [];
       let conditions = [];
 
@@ -1497,8 +1514,23 @@ app.get('/get-orders', async (req, res) => {
       }
 
       if (start_date && end_date) {
-         conditions.push(`created_at BETWEEN $${queryParams.length + 1} AND $${queryParams.length + 2}`);
-         queryParams.push(start_date, end_date);
+         // Преобразуем даты из формата DD.MM.YYYY в формат YYYY-MM-DD для PostgreSQL
+         let startDateFormatted = start_date;
+         let endDateFormatted = end_date;
+
+         // Если даты в формате DD.MM.YYYY, преобразуем их
+         if (start_date.includes('.')) {
+            const [day, month, year] = start_date.split('.');
+            startDateFormatted = `${year}-${month}-${day}`;
+         }
+
+         if (end_date.includes('.')) {
+            const [day, month, year] = end_date.split('.');
+            endDateFormatted = `${year}-${month}-${day}`;
+         }
+
+         conditions.push(`created_at::DATE BETWEEN $${queryParams.length + 1}::DATE AND $${queryParams.length + 2}::DATE`);
+         queryParams.push(startDateFormatted, endDateFormatted);
       }
 
       if (type) {
