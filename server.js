@@ -1450,7 +1450,7 @@ app.post('/add-order', async (req, res) => {
          timestamp = `${year}-${month}-${day} ${timePart}:00+03`;  // Явно указываем московский часовой пояс (+03)
       } else {
          // Для текущей даты используем московское время (UTC+3)
-         const moscowOffset = 3 * 60 * 60 * 1000; // 3 часа в миллисекундах
+         const moscowOffset = 2 * 60 * 60 * 1000; // 3 часа в миллисекундах
          const now = new Date();
          const moscowTime = new Date(now.getTime() + moscowOffset); // Если now уже в локальном времени, уберите это
 
