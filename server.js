@@ -459,9 +459,9 @@ app.get('/accounts', async (req, res) => {
 
       // Фильтр по дате создания (только для не-админского режима)
       if (admin_mode !== 'true') {
-         const currentDate = new Date().toISOString().split('T')[0];
-         conditions.push(`a.date_of_create IS NOT NULL AND a.date_of_create::DATE <= $${queryParams.length + 1}::DATE`);
-         queryParams.push(currentDate);
+         const currentDateTime = new Date().toISOString();
+         conditions.push(`a.date_of_create IS NOT NULL AND a.date_of_create <= $${queryParams.length + 1}`);
+         queryParams.push(currentDateTime);
       }
 
       // Применяем фильтры
@@ -820,7 +820,6 @@ app.get('/cities', authMiddleware, async (req, res) => {
    }
 });
 
-// Финальный эндпоинт для получения тегов - аккаунты с NULL датой НЕ учитываются
 app.get('/tags', async (req, res) => {
    try {
       // Используем текущую дату и время для корректного сравнения
