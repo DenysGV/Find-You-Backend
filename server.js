@@ -1446,28 +1446,37 @@ app.post('/add-order', async (req, res) => {
          const [datePart, timePart] = created_at.split(' ');
          const [day, month, year] = datePart.split('.');
 
-         // Формируем строку в формате YYYY-MM-DD HH:MM:SS
-         timestamp = `${year}-${month}-${day} ${timePart}:00`;
+         // Формируем строку в формате YYYY-MM-DD HH:MM:SS с указанием часового пояса
+         timestamp = `${year}-${month}-${day} ${timePart}:00+03`;  // Явно указываем московский часовой пояс (+03)
       } else {
-         // Используем текущую дату в UTC формате
+         // Для текущей даты используем московское время (UTC+3)
+         const moscowOffset = 3 * 60 * 60 * 1000; // 3 часа в миллисекундах
          const now = new Date();
-         timestamp = now.toISOString().slice(0, 19).replace('T', ' ');
+         const moscowTime = new Date(now.getTime() + moscowOffset); // Если now уже в локальном времени, уберите это
+
+         // Формируем дату в формате YYYY-MM-DD HH:MM:SS с указанием часового пояса
+         const year = moscowTime.getUTCFullYear();
+         const month = String(moscowTime.getUTCMonth() + 1).padStart(2, '0');
+         const day = String(moscowTime.getUTCDate()).padStart(2, '0');
+         const hours = String(moscowTime.getUTCHours()).padStart(2, '0');
+         const minutes = String(moscowTime.getUTCMinutes()).padStart(2, '0');
+         const seconds = String(moscowTime.getUTCSeconds()).padStart(2, '0');
+
+         timestamp = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}+03`;
       }
+
+      // Выполняем SQL запрос с явной установкой временной зоны для сессии
+      await pool.query('SET timezone = "Europe/Moscow";');
 
       // Вставляем в базу данных
       const query = `
          INSERT INTO orders (user_id, created_at, text, status, type)
-         VALUES ($1, $2, $3, 1, $4)
-         RETURNING *;
+         VALUES ($1, $2::timestamp with time zone, $3, 1, $4)
+         RETURNING *, 
+                  TO_CHAR(created_at AT TIME ZONE 'Europe/Moscow', 'DD.MM.YYYY HH24:MI') as formatted_date;
       `;
 
       const { rows } = await pool.query(query, [user_id, timestamp, text, type || null]);
-
-      // Форматируем дату для вывода в локальном формате
-      if (rows[0] && rows[0].created_at) {
-         const createdDate = new Date(rows[0].created_at);
-         rows[0].formatted_date = `${String(createdDate.getDate()).padStart(2, '0')}.${String(createdDate.getMonth() + 1).padStart(2, '0')}.${createdDate.getFullYear()} ${String(createdDate.getHours()).padStart(2, '0')}:${String(createdDate.getMinutes()).padStart(2, '0')}`;
-      }
 
       res.status(201).json(rows[0]);
    } catch (err) {
