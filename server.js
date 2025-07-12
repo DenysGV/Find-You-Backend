@@ -3252,6 +3252,11 @@ app.post("/site-status", async (req, res) => {
    }
 });
 
+app.post("/freekassa-notify", async (req, res) => {
+   return res.status(200).send("YES");
+});
+
+
 app.use('/uploads', express.static(path.join(__dirname, 'pages')));
 
 
