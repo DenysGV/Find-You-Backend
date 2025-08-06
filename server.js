@@ -2904,53 +2904,92 @@ app.delete("/delete-accounts", async (req, res) => {
 });
 
 app.post("/save-sections", upload.array('files'), async (req, res) => {
+   const client = await pool.connect(); // Используем транзакцию для атомарности
    try {
+      await client.query('BEGIN'); // Начинаем транзакцию
+
       const { page_name } = req.body;
-      const sections = Array.isArray(req.body.sections) ? req.body.sections : JSON.parse(req.body.sections);
+      const sectionsData = JSON.parse(req.body.sections);
+      // *** ИСПРАВЛЕНО ЗДЕСЬ: Правильно парсим retained_media_items ***
+      const retainedMediaItems = JSON.parse(req.body.retained_media_items || '[]');
+      const newUploadedFiles = req.files; // Файлы, загруженные через multer
 
       const sectionDir = path.join(__dirname, "pages", page_name);
 
-      // Удаляем все секции с указанным page_name из БД
-      await pool.query(`DELETE FROM sections WHERE page_name = $1`, [page_name]);
+      // 1. Собираем все имена файлов, которые ДОЛЖНЫ быть на диске
+      const desiredFilenames = new Set();
+      retainedMediaItems.forEach(item => {
+         // item может быть полным URL (например, /uploads/page_name/file.jpg)
+         // или просто именем файла (для новых файлов, отправленных фронтендом по имени)
+         const filename = path.basename(item); // Извлекаем имя файла из URL или используем как есть
+         desiredFilenames.add(filename);
+      });
 
-      // Если папка уже существует, удаляем её вместе с содержимым
-      console.log(fs.existsSync(sectionDir));
-
-      if (fs.existsSync(sectionDir)) {
-         fs.rmSync(sectionDir, { recursive: true, force: true });
+      // Добавляем имена новых загруженных файлов в список желаемых
+      if (Array.isArray(newUploadedFiles)) {
+         newUploadedFiles.forEach(file => {
+            desiredFilenames.add(file.originalname);
+         });
       }
 
-      // Создаем новую директорию для изображений
-      fs.mkdirSync(sectionDir, { recursive: true });
+      // 2. Управление файлами на диске
+      if (fs.existsSync(sectionDir)) {
+         const currentFilesOnDisk = fs.readdirSync(sectionDir);
 
-      for (const section of sections) {
-         const { section_order, layout_id, content } = section;
+         // Удаляем файлы, которые больше не нужны
+         for (const fileOnDisk of currentFilesOnDisk) {
+            if (!desiredFilenames.has(fileOnDisk)) {
+               fs.unlinkSync(path.join(sectionDir, fileOnDisk));
+               console.log(`Удален файл: ${fileOnDisk}`);
+            }
+         }
+      } else {
+         // Если директории нет, создаем ее
+         fs.mkdirSync(sectionDir, { recursive: true });
+      }
 
-         // Вставляем новую секцию в БД
-         await pool.query(
-            `INSERT INTO sections (page_name, section_order, layout_id, content) 
-            VALUES ($1, $2, $3, $4)`,
-            [page_name, section_order, layout_id, content]
-         );
-
-         // Проверяем, есть ли файлы для сохранения
-         if (req.files && req.files.length > 0) {
-            req.files.forEach((file) => {
-               const tempFilePath = file.path; // Используем путь, который multer присвоил файлу
-               const newFilePath = path.join(sectionDir, file.originalname);
-
-               try {
-                  fs.renameSync(tempFilePath, newFilePath);  // Перемещаем файл
-               } catch (error) {
-               }
-            });
+      // 3. Перемещаем новые загруженные файлы из временной папки
+      if (Array.isArray(newUploadedFiles)) {
+         for (const file of newUploadedFiles) {
+            const tempFilePath = file.path;
+            const newFilePath = path.join(sectionDir, file.originalname);
+            fs.renameSync(tempFilePath, newFilePath);
+            console.log(`Перемещен новый файл: ${file.originalname}`);
          }
       }
 
+      // 4. Обновляем или вставляем секции в базу данных
+      // Сначала удаляем все старые секции для этой страницы, чтобы избежать дубликатов
+      // и корректно обработать изменение порядка или удаление секций
+      await client.query(`DELETE FROM sections WHERE page_name = $1`, [page_name]);
+
+      for (const section of sectionsData) {
+         const { section_order, layout_id, content } = section;
+
+         // Вставляем новую секцию в БД. image_urls здесь НЕ используется,
+         // так как мы договорились не менять схему БД.
+         await client.query(
+            `INSERT INTO sections (page_name, section_order, layout_id, content)
+                 VALUES ($1, $2, $3, $4)`,
+            [page_name, section_order, layout_id, content]
+         );
+      }
+
+      await client.query('COMMIT'); // Завершаем транзакцию
       res.json({ message: "Секции успешно сохранены!" });
+
    } catch (error) {
+      await client.query('ROLLBACK'); // Откатываем транзакцию в случае ошибки
       console.error("Ошибка при сохранении секций:", error);
       res.status(500).json({ error: error.message });
+   } finally {
+      client.release(); // Освобождаем клиент пула
+      // Очищаем временную папку Multer, если она не пуста
+      if (fs.existsSync('uploads_temp/')) {
+         fs.readdirSync('uploads_temp/').forEach(file => {
+            fs.unlinkSync(path.join('uploads_temp/', file));
+         });
+      }
    }
 });
 
@@ -3152,25 +3191,39 @@ app.get('/sections', async (req, res) => {
          return res.status(400).json({ message: "Необходимо указать page_name" });
       }
 
+      // 1. Получаем секции из базы данных
+      // Важно: здесь мы НЕ запрашиваем image_urls, так как их нет в БД
       const sectionsQuery = await pool.query(
-         "SELECT * FROM sections WHERE page_name = $1 ORDER BY section_order",
+         "SELECT id, layout_id, content, section_order, page_name FROM sections WHERE page_name = $1 ORDER BY section_order",
          [page_name]
       );
 
+      // Если в БД ничего нет, то и контента нет
       if (sectionsQuery.rows.length === 0) {
          return res.status(404).json({ message: "Секции не найдены" });
       }
 
       let sections = sectionsQuery.rows;
+      let images = []; // Инициализируем массив изображений как пустой
 
+      // 2. Проверяем наличие папки ПЕРЕД тем, как читать из нее
       const sectionPath = path.join(__dirname, 'pages', `${page_name}`);
-      let images = fs.readdirSync(sectionPath)
-         .filter(file => file.endsWith('.jpg') || file.endsWith('.png'))
-         .map(file => `/uploads/${page_name}/${file}`);
 
+      if (fs.existsSync(sectionPath)) {
+         // Если папка существует, читаем из нее файлы
+         images = fs.readdirSync(sectionPath)
+            .filter(file => {
+               const ext = path.extname(file).toLowerCase();
+               return ['.jpg', '.png', '.gif', '.webp', '.mp4', '.mov'].includes(ext);
+            })
+            .map(file => `/uploads/${page_name}/${file}`); // Путь должен быть правильным для доступа с фронтенда
+      }
+
+      // 3. Отправляем данные в любом случае
       res.json({ sections, images });
+
    } catch (err) {
-      console.error('Ошибка:', err);
+      console.error('Ошибка при получении секций:', err);
       res.status(500).json({ error: 'Server error', message: err.message });
    }
 });
