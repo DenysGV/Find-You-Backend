@@ -726,7 +726,7 @@ app.get('/account', async (req, res) => {
                const filesList = await listFiles(remotePath);
                // Фильтруем только изображения и видео и формируем URL-адреса
                files = filesList
-                  .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.mp4'))
+                  .filter(file => file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.mp4') || file.endsWith('.mov') || file.endsWith('.gif') || file.endsWith('.mp4') || file.endsWith('.webp'))
                   .map(file => getPublicUrl(`/${remotePath}/${file}`));
                console.log(`Получено ${files.length} файлов для пользователя ${remotePath}`);
             } else {
@@ -2744,7 +2744,7 @@ app.post("/account-edit-media", upload.array("files"), async (req, res) => {
             .filter(file => {
                const ext = path.extname(file).toLowerCase();
                return ext === '.jpg' || ext === '.png' || ext === '.jpeg' || ext === '.gif' ||
-                  ext === '.mp4' || ext === '.mov' || ext === '.avi' || ext === '.mkv';
+                  ext === '.mp4' || ext === '.mov' || ext === '.avi' || ext === '.mkv' || ext === '.webp';
             })
             .map(file => ({
                name: file,
@@ -2825,7 +2825,10 @@ app.get('/fileBase/*', async (req, res) => {
             '.jpg': 'image/jpeg',
             '.jpeg': 'image/jpeg',
             '.png': 'image/png',
-            '.mp4': 'video/mp4'
+            '.mp4': 'video/mp4',
+            '.mov': 'video/mov',
+            '.webp': 'image/webp',
+            '.gif': 'image/gif',
          };
 
          // Set appropriate content type
