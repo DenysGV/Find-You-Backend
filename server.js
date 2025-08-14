@@ -21,8 +21,10 @@ import {
    listFiles,
    uploadFile,
    deleteFile,
+   deleteRemoteDirectory,
    getPublicUrl,
-   deleteRemoteDirectory
+   getSftpClient,
+   releaseSftpClient
 } from './sftp-utils.js';
 
 dotenv.config();
@@ -2812,7 +2814,7 @@ app.get('/fileBase/*', async (req, res) => {
       const sftp = await getSftpClient();
 
       try {
-         const fullPath = path.posix.join(BASE_PATH, filePath.replace('/fileBase/', ''));
+         const fullPath = path.posix.join(process.env.SFTP_BASE_PATH, filePath.replace('/fileBase/', ''));
          const exists = await sftp.exists(fullPath);
 
          if (!exists) {
@@ -2835,7 +2837,7 @@ app.get('/fileBase/*', async (req, res) => {
          res.setHeader('Content-Type', contentTypes[ext] || 'application/octet-stream');
 
          // Stream the file directly to the response
-         const readStream = await sftp.createReadStream(fullPath);
+         const readStream = sftp.createReadStream(fullPath);
          readStream.pipe(res);
 
          // Handle read stream errors
