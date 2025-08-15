@@ -2909,70 +2909,106 @@ app.delete("/delete-accounts", async (req, res) => {
 });
 
 app.post("/save-sections", upload.array('files'), async (req, res) => {
-   const client = await pool.connect(); // Используем транзакцию для атомарности
+   const client = await pool.connect();
+
    try {
-      await client.query('BEGIN'); // Начинаем транзакцию
+      await client.query('BEGIN');
 
-      const { page_name } = req.body;
-      const sectionsData = JSON.parse(req.body.sections);
-      // *** ИСПРАВЛЕНО ЗДЕСЬ: Правильно парсим retained_media_items ***
-      const retainedMediaItems = JSON.parse(req.body.retained_media_items || '[]');
-      const newUploadedFiles = req.files; // Файлы, загруженные через multer
+      const { page_name } = req.body || {};
+      let sectionsData = [];
+      let retainedMediaItems = [];
+      let fileReplacements = {};
 
-      const sectionDir = path.join(__dirname, "pages", page_name);
-
-      // 1. Собираем все имена файлов, которые ДОЛЖНЫ быть на диске
-      const desiredFilenames = new Set();
-      retainedMediaItems.forEach(item => {
-         // item может быть полным URL (например, /uploads/page_name/file.jpg)
-         // или просто именем файла (для новых файлов, отправленных фронтендом по имени)
-         const filename = path.basename(item); // Извлекаем имя файла из URL или используем как есть
-         desiredFilenames.add(filename);
-      });
-
-      // Добавляем имена новых загруженных файлов в список желаемых
-      if (Array.isArray(newUploadedFiles)) {
-         newUploadedFiles.forEach(file => {
-            desiredFilenames.add(file.originalname);
-         });
+      try {
+         sectionsData = JSON.parse(req.body.sections || '[]');
+      } catch {
+         sectionsData = [];
+      }
+      try {
+         retainedMediaItems = JSON.parse(req.body.retained_media_items || '[]');
+      } catch {
+         retainedMediaItems = [];
+      }
+      try {
+         fileReplacements = JSON.parse(req.body.file_replacements || '{}');
+      } catch {
+         fileReplacements = {};
       }
 
-      // 2. Управление файлами на диске
-      if (fs.existsSync(sectionDir)) {
-         const currentFilesOnDisk = fs.readdirSync(sectionDir);
+      if (!page_name) {
+         await client.query('ROLLBACK');
+         return res.status(400).json({ error: 'page_name is required' });
+      }
 
-         // Удаляем файлы, которые больше не нужны
-         for (const fileOnDisk of currentFilesOnDisk) {
-            if (!desiredFilenames.has(fileOnDisk)) {
-               fs.unlinkSync(path.join(sectionDir, fileOnDisk));
-               console.log(`Удален файл: ${fileOnDisk}`);
-            }
-         }
-      } else {
-         // Если директории нет, создаем ее
+      const sectionDir = path.join(__dirname, "pages", page_name);
+      if (!fs.existsSync(sectionDir)) {
          fs.mkdirSync(sectionDir, { recursive: true });
       }
 
-      // 3. Перемещаем новые загруженные файлы из временной папки
-      if (Array.isArray(newUploadedFiles)) {
-         for (const file of newUploadedFiles) {
-            const tempFilePath = file.path;
-            const newFilePath = path.join(sectionDir, file.originalname);
-            fs.renameSync(tempFilePath, newFilePath);
-            console.log(`Перемещен новый файл: ${file.originalname}`);
+      const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+      const savedFiles = [];
+
+      // Сохраняем каждый пришедший файл
+      for (const f of uploadedFiles) {
+         const targetPath = path.join(sectionDir, f.originalname);
+         try {
+            if (fs.existsSync(targetPath)) {
+               fs.unlinkSync(targetPath);
+            }
+            if (f.path && fs.existsSync(f.path)) {
+               fs.renameSync(f.path, targetPath);
+            } else if (f.buffer) {
+               fs.writeFileSync(targetPath, f.buffer);
+            } else {
+               continue;
+            }
+            savedFiles.push(f.originalname);
+         } catch {
+            // Ошибку по сохранению конкретного файла просто пропускаем
          }
       }
 
-      // 4. Обновляем или вставляем секции в базу данных
-      // Сначала удаляем все старые секции для этой страницы, чтобы избежать дубликатов
-      // и корректно обработать изменение порядка или удаление секций
-      await client.query(`DELETE FROM sections WHERE page_name = $1`, [page_name]);
+      // Формируем список файлов, которые нужно оставить
+      const filesToKeep = new Set();
 
+      for (const item of retainedMediaItems) {
+         if (typeof item === 'string') {
+            filesToKeep.add(path.basename(item));
+         }
+      }
+      for (const fname of savedFiles) {
+         filesToKeep.add(fname);
+      }
+      for (const section of sectionsData) {
+         if (Array.isArray(section.mediaItems)) {
+            for (const mi of section.mediaItems) {
+               if (typeof mi === 'string') {
+                  const parts = mi.split('/');
+                  const last = parts[parts.length - 1];
+                  if (last && path.extname(last)) {
+                     filesToKeep.add(last);
+                  }
+               }
+            }
+         }
+      }
+
+      // Удаляем лишние файлы
+      const currentFilesOnDisk = fs.existsSync(sectionDir) ? fs.readdirSync(sectionDir) : [];
+      for (const fileOnDisk of currentFilesOnDisk) {
+         if (!filesToKeep.has(fileOnDisk)) {
+            try {
+               fs.unlinkSync(path.join(sectionDir, fileOnDisk));
+            } catch {
+               // Ошибку при удалении игнорируем
+            }
+         }
+      }
+
+      // Сохраняем секции в БД
+      await client.query(`DELETE FROM sections WHERE page_name = $1`, [page_name]);
       for (const section of sectionsData) {
          const { section_order, layout_id, content } = section;
-
-         // Вставляем новую секцию в БД. image_urls здесь НЕ используется,
-         // так как мы договорились не менять схему БД.
          await client.query(
             `INSERT INTO sections (page_name, section_order, layout_id, content)
                  VALUES ($1, $2, $3, $4)`,
@@ -2980,21 +3016,22 @@ app.post("/save-sections", upload.array('files'), async (req, res) => {
          );
       }
 
-      await client.query('COMMIT'); // Завершаем транзакцию
-      res.json({ message: "Секции успешно сохранены!" });
+      await client.query('COMMIT');
+
+      return res.json({
+         message: "Секции и файлы успешно сохранены",
+         stats: {
+            receivedFiles: uploadedFiles.length,
+            savedFiles,
+            kept: Array.from(filesToKeep)
+         }
+      });
 
    } catch (error) {
-      await client.query('ROLLBACK'); // Откатываем транзакцию в случае ошибки
-      console.error("Ошибка при сохранении секций:", error);
-      res.status(500).json({ error: error.message });
+      await client.query('ROLLBACK');
+      return res.status(500).json({ error: error.message });
    } finally {
-      client.release(); // Освобождаем клиент пула
-      // Очищаем временную папку Multer, если она не пуста
-      if (fs.existsSync('uploads_temp/')) {
-         fs.readdirSync('uploads_temp/').forEach(file => {
-            fs.unlinkSync(path.join('uploads_temp/', file));
-         });
-      }
+      client.release();
    }
 });
 
